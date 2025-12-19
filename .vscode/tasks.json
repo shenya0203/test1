@@ -1,0 +1,164 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build Native",
+            "type": "shell",
+            "command": "C:\\zig\\zig.exe",
+            "args": [
+                "build"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "detail": "Build for native platform"
+        },
+        {
+            "label": "Build OpenWrt",
+            "type": "shell",
+            "command": "C:\\zig\\zig.exe",
+            "args": [
+                "build",
+                "openwrt"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "detail": "Build for OpenWrt (aarch64-linux-musl)"
+        },
+        {
+            "label": "Build with Target Option",
+            "type": "shell",
+            "command": "C:\\zig\\zig.exe",
+            "args": [
+                "build",
+                "-Dtarget=aarch64-linux-musl"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "detail": "Build using -Dtarget option"
+        },
+        {
+            "label": "Build OpenWrt (Custom Flag)",
+            "type": "shell",
+            "command": "C:\\zig\\zig.exe",
+            "args": [
+                "build",
+                "-Dopenwrt=true"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "detail": "Build using -Dopenwrt flag"
+        },
+        {
+            "label": "Run Native",
+            "type": "shell",
+            "command": "C:\\zig\\zig.exe",
+            "args": [
+                "build",
+                "run"
+            ],
+            "group": {
+                "kind": "test",
+                "isDefault": false
+            },
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "detail": "Build and run for native platform"
+        },
+        {
+            "label": "Test",
+            "type": "shell",
+            "command": "C:\\zig\\zig.exe",
+            "args": [
+                "build",
+                "test"
+            ],
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "detail": "Run unit tests"
+        },
+        {
+            "label": "Clean",
+            "type": "shell",
+            "command": "C:\\zig\\zig.exe",
+            "args": [
+                "build",
+                "--cache-dir",
+                "zig-cache"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": [],
+            "detail": "Clean build cache"
+        }
+    ]
+}
