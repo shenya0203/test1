@@ -1,0 +1,6 @@
+初始接口： hi_link_init
+
+
+MQTT 消息处理函数：hlk_MQTTYield
+
+固件版本存储位置：SYSUPGRADE_MSGID_PATH    /log/ota_ver.bin

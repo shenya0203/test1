@@ -1,0 +1,33 @@
+choice
+    prompt "HiLink Product ID"
+    default HLK_PRODUCT_RM65
+    help
+      Select the HiLink product ID for compilation
+
+config HLK_PRODUCT_RM50
+    bool "RM50"
+
+config HLK_PRODUCT_RM60
+    bool "RM60"
+
+config HLK_PRODUCT_RM65
+    bool "RM65"
+
+config HLK_PRODUCT_RM68
+    bool "RM68"
+
+config HLK_PRODUCT_7628
+    bool "7628"
+
+endchoice
+
+config HLK_PRODUCT_ID
+    string
+    default "RM50" if HLK_PRODUCT_RM50
+    default "RM60" if HLK_PRODUCT_RM60
+    default "RM65" if HLK_PRODUCT_RM65
+    default "RM68" if HLK_PRODUCT_RM68
+    default "7628" if HLK_PRODUCT_7628
+    default "RM65"
+    help
+      Specify the HiLink product ID (e.g., RM65, RM68, RM60, RM50) 

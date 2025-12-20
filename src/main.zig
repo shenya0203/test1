@@ -4,40 +4,25 @@ const std = @import("std");
 // 导入 C 函数声明
 // extern 表示这是外部函数声明，通常用于 C 函数
 // "c" 表示 C 调用约定
-extern "c" fn start_modbus_collector(argc: c_int, argv: [*c][*c]u8) c_int;
+extern "c" fn hi_link_init() c_int;
+extern "c" fn sleep(seconds: c_uint) c_int;
 
 // 定义主函数 main()
 pub fn main() !void {
-    // 获取命令行参数
-    var args = try std.process.argsWithAllocator(std.heap.page_allocator);
-    defer args.deinit();
+    // 调用 C 函数启动MQTT主程序
+    const result = hi_link_init();
 
-    // 计算参数数量
-    var argc: usize = 0;
-    var arg_iter = args;
-    while (arg_iter.next()) |_| {
-        argc += 1;
+    // 检查初始化结果
+    if (result != 0) {
+        std.process.exit(@intCast(result));
     }
 
-    // 重新创建参数数组以传递给 C 函数
-    var argv = try std.heap.page_allocator.alloc([*c]u8, argc);
-    defer std.heap.page_allocator.free(argv);
-
-    // 重置参数迭代器
-    args = try std.process.argsWithAllocator(std.heap.page_allocator);
-
-    // 填充 argv 数组
-    var i: usize = 0;
-    while (args.next()) |arg| {
-        argv[i] = @constCast(arg.ptr);
-        i += 1;
+    // 初始化成功后，主线程需要卡住等待，避免进程退出
+    // 这样后台线程或服务可以继续运行
+    while (true) {
+        // 每秒检查一次，保持进程运行
+        _ = sleep(1);
     }
-
-    // 调用 C 函数
-    const result = start_modbus_collector(@intCast(argc), argv.ptr);
-
-    // 根据返回值退出
-    std.process.exit(@intCast(result));
 }
 
 // 定义一个测试用例，名称为 "simple test"

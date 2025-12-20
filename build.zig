@@ -1,195 +1,84 @@
 const std = @import("std");
+const builtin = @import("builtin");
+
+// 平台配置结构体
+const PlatformConfig = struct {
+    name: []const u8, // 目标名称 (mt7688, mt7981, mt7621)
+    product_id: []const u8, // 产品ID (7628, RM65, RM60)
+    arch: std.Target.Query, // 目标架构
+    macro: []const u8, // C宏定义
+    single_threaded: bool, // 是否单线程
+};
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // 1. 定义 MT7688 (OpenWrt) 的专用目标参数
-    const mt7688_target_query = b.resolveTargetQuery(.{
-        .cpu_arch = .mipsel, // MIPS 小端序
-        .os_tag = .linux, // 运行 Linux
-        .abi = .musleabi, // 使用musl ABI
-    });
+    // 定义平台配置列表
+    const platforms = [_]PlatformConfig{
+        .{
+            .name = "mt7688",
+            .product_id = "7628",
+            .arch = .{
+                .cpu_arch = .mipsel,
+                .os_tag = .linux,
+                .abi = .musleabi,
+            },
+            .macro = "HLK_PRODUCT_7628",
+            .single_threaded = true, // MT7688 是单核 CPU
+        },
+        .{
+            .name = "mt7981",
+            .product_id = "RM65",
+            .arch = .{
+                .cpu_arch = .aarch64,
+                .os_tag = .linux,
+                .abi = .musleabihf,
+            },
+            .macro = "HLK_PRODUCT_RM65",
+            .single_threaded = false, // MT7981 支持多线程
+        },
+        .{
+            .name = "mt7621",
+            .product_id = "RM60",
+            .arch = .{
+                .cpu_arch = .mipsel,
+                .os_tag = .linux,
+                .abi = .musleabi,
+                .cpu_model = .{ .explicit = &std.Target.mips.cpu.mips32r2 },
+            },
+            .macro = "HLK_PRODUCT_RM60",
+            .single_threaded = false, // MT7621 支持多线程
+        },
+    };
 
-    // 1. 定义 MT7621 的目标查询
-    // MT7621 属于 mipsel (小端)，内核为 1004Kc
-    const mt7621_target_query = b.resolveTargetQuery(.{
-        .cpu_arch = .mipsel,
-        .os_tag = .linux,
-        .abi = .musleabi, // LEDE/OpenWrt 统一使用 musl
-        // Zig 内部 mips32r2 是最匹配 MT7621 (1004Kc) 的指令集选项
-        .cpu_model = .{ .explicit = &std.Target.mips.cpu.mips32r2 },
-    });
-
-    // 自定义选项：是否通过 -Dopenwrt=true 快速切换目标
-    const openwrt_target = b.option(bool, "openwrt", "Build for OpenWrt (aarch64-linux-musl)") orelse false;
-
-    // 创建 test1 模块
-    const mod = b.addModule("test1", .{
+    // 创建默认模块 (用于测试等)
+    const mod = b.addModule("hlk_cloud", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    // 1. 确定常规构建的目标 (zig build)
-    const actual_target = if (openwrt_target)
-        b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .musleabihf })
-    else
-        target;
+    // 为每个平台创建构建步骤
+    for (platforms) |platform| {
+        createPlatformBuildStep(b, platform, mod);
+    }
 
-    // 2. 创建主可执行文件 (常规构建)
-    // 这是一个灵活的构建配置，保留了调试能力
+    // 默认构建步骤 (用于开发和测试)
     const exe = b.addExecutable(.{
-        .name = "test1",
+        .name = "hlk_cloud",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
-            .target = actual_target,
-            .optimize = optimize, // 默认跟随命令行参数 -Doptimize
+            .target = target,
+            .optimize = optimize,
             .imports = &.{
-                .{ .name = "test1", .module = mod },
+                .{ .name = "hlk_cloud", .module = mod },
             },
-            // 如果是通过 -Dopenwrt=true 构建，我们也顺便做一下优化
-            .strip = if (openwrt_target) true else null,
-            .single_threaded = if (openwrt_target) true else null,
         }),
     });
     b.installArtifact(exe);
 
-    // ============================================================
-    // 3. OpenWrt 专用构建步骤 (zig build openwrt)
-    // 这里我们强制应用所有瘦身策略，确保生成的二进制文件最小
-    // ============================================================
-    const openwrt_step = b.step("openwrt", "Build for OpenWrt (Production Ready: Small & Stripped)");
-    const openwrt_target_query = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .musleabihf });
-
-    const openwrt_exe = b.addExecutable(.{
-        .name = "test1",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = openwrt_target_query,
-
-            // 【核心优化点】
-            .optimize = .ReleaseSmall, // 强制使用“最小体积”优化，无视命令行参数
-            .strip = true, // 强制去除所有符号表 (减小 30%+)
-            .single_threaded = true, // 强制单线程 (减少运行时开销)
-
-            .imports = &.{
-                .{ .name = "test1", .module = mod },
-            },
-        }),
-    });
-
-    // 将产物安装到 zig-out/openwrt/ 目录下
-    const openwrt_install = b.addInstallArtifact(openwrt_exe, .{
-        .dest_dir = .{ .override = .{ .custom = "openwrt" } },
-    });
-    openwrt_step.dependOn(&openwrt_install.step);
-
-    // ============================================================
-    // 4. MT7688 专用构建命令 (zig build mt7688)
-    // 直接执行 zig build mt7688 即可生成最小化的 MIPS 二进制文件
-    // ============================================================
-    const mt7688_step = b.step("mt7688", "Build for MT7688 OpenWrt (Small & Stripped)");
-
-    const mt7688_exe = b.addExecutable(.{
-        .name = "modbus_collector_mt7688",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = mt7688_target_query,
-
-            // 针对 MT7688 极小内存环境的优化
-            .optimize = .ReleaseSmall,
-            .strip = true, // 移除符号表，大幅减小体积
-            .single_threaded = true, // MT7688 是单核 CPU，禁用多线程支持可减小体积
-
-            .imports = &.{
-                .{ .name = "test1", .module = mod },
-            },
-        }),
-    });
-
-    // 为 MT7688 添加 C 代码编译
-    const mt7688_c_files = [_][]const u8{
-        "src/c_code/modbus_collector.c",
-        "src/c_code/shm_lookup.c",
-        "src/c_code/shm_protocol.c",
-    };
-
-    // 添加 C 文件到 MT7688 可执行文件
-    for (mt7688_c_files) |c_file| {
-        mt7688_exe.addCSourceFile(.{
-            .file = b.path(c_file),
-            .flags = &.{
-                "-std=gnu99",
-                "-Wall",
-                "-Wextra",
-                "-O2",
-                "-D__MUSL__", // 强制使用musl兼容的函数
-                "-D_TIME_BITS=32", // 强制使用32位时间函数
-                "-D_FILE_OFFSET_BITS=32", // 强制使用32位文件偏移
-                "-I",
-                "src/c_code/include/openwrt/include",
-                "-I",
-                "src/c_code/include/openwrt/include/libubox",
-                "-I",
-                "src/c_code/include/openwrt/include/modbus",
-                "-I",
-                "src/c_code/include/openwrt/include/cjson",
-            },
-        });
-    }
-
-    // 添加库搜索路径
-    mt7688_exe.addLibraryPath(b.path("src/c_code/include/openwrt/lib"));
-
-    // 链接 OpenWrt 库
-    mt7688_exe.linkSystemLibrary("pthread");
-    mt7688_exe.linkSystemLibrary("modbus");
-    mt7688_exe.linkSystemLibrary("uci");
-    mt7688_exe.linkSystemLibrary("cjson");
-    mt7688_exe.linkSystemLibrary("ubox");
-
-    // 将产物安装到 zig-out/mt7688/ 目录下
-    const mt7688_install = b.addInstallArtifact(mt7688_exe, .{
-        .dest_dir = .{ .override = .{ .custom = "mt7688" } },
-    });
-    mt7688_step.dependOn(&mt7688_install.step);
-
-    // ============================================================
-    // 2. MT7621 专用构建步骤 (zig build mt7621)
-    // ============================================================
-    const mt7621_step = b.step("mt7621", "Build for MT7621 (1004Kc, Multi-thread)");
-
-    const mt7621_exe = b.addExecutable(.{
-        .name = "test1_mt7621",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = mt7621_target_query,
-
-            // 优化选项
-            .optimize = .ReleaseSmall, // 考虑到路由器 Flash 空间通常较小
-            .strip = true, // 必须移除符号表以减小体积
-
-            // 注意：MT7621 是多核多线程，这里不再设置 single_threaded = true
-            // 以便利用它的多核性能
-
-            .imports = &.{
-                .{ .name = "test1", .module = mod },
-            },
-        }),
-    });
-
-    // 安装到 zig-out/mt7621/
-    const mt7621_install = b.addInstallArtifact(mt7621_exe, .{
-        .dest_dir = .{ .override = .{ .custom = "mt7621" } },
-    });
-    mt7621_step.dependOn(&mt7621_install.step);
-
-    // ============================================================
-    // 运行和测试步骤 (保持不变)
-    // ============================================================
-
-    // Run step
+    // 运行步骤
     const run_step = b.step("run", "Run the app");
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
@@ -199,18 +88,274 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
-    // Tests
-    const mod_tests = b.addTest(.{
-        .root_module = mod,
-    });
-    const run_mod_tests = b.addRunArtifact(mod_tests);
-
+    // 测试步骤
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
     const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+}
+
+// 为特定平台创建构建步骤
+fn createPlatformBuildStep(b: *std.Build, platform: PlatformConfig, mod: *std.Build.Module) void {
+    const step = b.step(platform.name, std.fmt.allocPrint(b.allocator, "Build for {s} ({s})", .{ platform.name, platform.product_id }) catch unreachable);
+
+    // 生成版本头文件
+    const version_header_step = generateVersionHeader(b, platform.product_id);
+
+    // 创建可执行文件
+    const exe = b.addExecutable(.{
+        .name = std.fmt.allocPrint(b.allocator, "hlk_cloud_{s}", .{platform.name}) catch unreachable,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = b.resolveTargetQuery(platform.arch),
+            .optimize = .ReleaseSmall, // 嵌入式设备使用最小体积优化
+            .strip = true, // 移除符号表减少体积
+            .single_threaded = platform.single_threaded,
+            .imports = &.{
+                .{ .name = "hlk_cloud", .module = mod },
+            },
+            .link_libc = true, // 明确链接libc以支持C代码
+        }),
+    });
+
+    // 对于交叉编译，允许未定义符号（动态库在目标系统上提供）
+    exe.linker_allow_shlib_undefined = true;
+
+    // 添加构建依赖：先生成头文件，再编译
+    exe.step.dependOn(&version_header_step.step);
+
+    // 添加C源文件
+    addCSourceFiles(b, exe, platform.product_id, platform.macro);
+
+    // 添加包含路径和库依赖
+    addPlatformDependencies(b, exe, platform.name);
+
+    // 安装到指定目录
+    const install = b.addInstallArtifact(exe, .{
+        .dest_dir = .{ .override = .{ .custom = platform.name } },
+    });
+    step.dependOn(&install.step);
+}
+
+// 生成版本头文件
+fn generateVersionHeader(b: *std.Build, product_id: []const u8) *std.Build.Step.WriteFile {
+    // 使用固定的日期格式 (可以后续改进为动态日期)
+    const date_str = "20241220";
+
+    // 生成版本字符串
+    const version_content = std.fmt.allocPrint(b.allocator, "#define AT_VERSION \"{s}-1.0.0-{s}\"\n", .{ product_id, date_str }) catch unreachable;
+
+    // 创建写入文件步骤 (放到include目录，这样include "hi_cfm_version.h" 就能找到)
+    const write_file = b.addWriteFile("src/hlk_cloud/src/include/hi_cfm_version.h", version_content);
+
+    return write_file;
+}
+
+// 添加C源文件
+fn addCSourceFiles(b: *std.Build, exe: *std.Build.Step.Compile, product_id: []const u8, macro: []const u8) void {
+    var arena = std.heap.ArenaAllocator.init(b.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // 通用编译标志
+    const common_flags = [_][]const u8{
+        "-std=gnu99",
+        "-DSUPPORT_OPENWRT",
+        "-DENABLE_CURL",
+        "-D__MUSL__", // 明确标识为Musl环境
+        // 移除所有_TIME_BITS设置，让编译器使用默认的64位行为
+        "-D_FILE_OFFSET_BITS=64", // 使用64位文件偏移
+        "-D_LARGEFILE64_SOURCE",
+        std.fmt.allocPrint(allocator, "-D{s}", .{macro}) catch unreachable,
+    };
+
+    // 包含路径
+    const include_paths = [_][]const u8{
+        "src/hlk_cloud/src/include", // 主头文件目录
+        "src/hlk_cloud/src/source", // 源文件目录中的头文件
+        "src/hlk_cloud/src", // 支持相对包含路径如 MQTTPacket/MQTTPacket.h
+        std.fmt.allocPrint(allocator, "src/hlk_cloud/src/platform/{s}", .{product_id}) catch unreachable,
+    };
+
+    // 收集所有C源文件
+    var c_files = std.ArrayList([]const u8).initCapacity(allocator, 0) catch unreachable;
+
+    // 添加通用目录的C文件
+    addCSourcesFromDir(allocator, &c_files, "src/hlk_cloud/src/source");
+    addCSourcesFromDir(allocator, &c_files, "src/hlk_cloud/src/MQTTPacket");
+    addCSourcesFromDir(allocator, &c_files, "src/hlk_cloud/src/client");
+    addCSourcesFromDir(allocator, &c_files, "src/hlk_cloud/src/openwrt");
+    addCSourcesFromDir(allocator, &c_files, "src/hlk_cloud/src/linux");
+
+    // 添加特定平台的C文件
+    const platform_dir = std.fmt.allocPrint(allocator, "src/hlk_cloud/src/platform/{s}", .{product_id}) catch unreachable;
+    addCSourcesFromDir(allocator, &c_files, platform_dir);
+
+    // 构建完整的编译标志列表
+    var flags = std.ArrayList([]const u8).initCapacity(allocator, 0) catch unreachable;
+    flags.appendSlice(allocator, &common_flags) catch unreachable;
+
+    // 添加包含路径
+    for (include_paths) |path| {
+        flags.append(allocator, "-I") catch unreachable;
+        flags.append(allocator, path) catch unreachable;
+    }
+
+    // 为每个C文件添加编译步骤
+    for (c_files.items) |c_file| {
+        exe.addCSourceFile(.{
+            .file = b.path(c_file),
+            .flags = flags.items,
+        });
+    }
+
+    // On 32-bit MIPS musl (OpenWrt with musl 1.2.x) the runtime doesn't export
+    // glibc-style __*time64 symbols. The musl compatibility shim has been
+    // embedded directly in hi_mqtt.c to ensure it's always linked.
+    // No separate compilation unit needed.
+
+    std.log.info("Added {d} C source files for platform {s}", .{ c_files.items.len, product_id });
+}
+
+// 递归添加目录中的C文件
+fn addCSourcesFromDir(allocator: std.mem.Allocator, files: *std.ArrayList([]const u8), dir_path: []const u8) void {
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |err| {
+        std.log.warn("Failed to open directory {s}: {}", .{ dir_path, err });
+        return;
+    };
+    defer dir.close();
+
+    var walker = dir.walk(allocator) catch |err| {
+        std.log.warn("Failed to walk directory {s}: {}", .{ dir_path, err });
+        return;
+    };
+    defer walker.deinit();
+
+    // 有问题的文件列表，暂时跳过
+    const skip_files = [_][]const u8{};
+
+    while (walker.next() catch |err| {
+        std.log.warn("Failed to walk entry in {s}: {}", .{ dir_path, err });
+        return;
+    }) |entry| {
+        if (entry.kind == .file and std.mem.endsWith(u8, entry.path, ".c")) {
+            // 检查是否是要跳过的文件
+            var should_skip = false;
+            for (skip_files) |skip_file| {
+                if (std.mem.eql(u8, entry.path, skip_file)) {
+                    should_skip = true;
+                    std.log.warn("Skipping problematic file: {s}", .{entry.path});
+                    break;
+                }
+            }
+
+            if (!should_skip) {
+                const full_path = std.fs.path.join(allocator, &[_][]const u8{ dir_path, entry.path }) catch |err| {
+                    std.log.warn("Failed to join path {s}/{s}: {}", .{ dir_path, entry.path, err });
+                    continue;
+                };
+                files.append(allocator, full_path) catch |err| {
+                    std.log.warn("Failed to append file {s}: {}", .{ full_path, err });
+                    continue;
+                };
+            }
+        }
+    }
+}
+
+// 只添加一个简单的C文件用于测试
+fn addCSingleCFile(b: *std.Build, exe: *std.Build.Step.Compile, product_id: []const u8, macro: []const u8) void {
+    _ = product_id; // 暂时不使用
+
+    // 只添加一个简单的C文件来测试
+    exe.addCSourceFile(.{
+        .file = b.path("src/hlk_cloud/src/platform/7628/7628.c"),
+        .flags = &.{
+            "-std=gnu99",
+            "-DSUPPORT_OPENWRT",
+            std.fmt.allocPrint(b.allocator, "-D{s}", .{macro}) catch unreachable,
+            "-I",
+            "src/hlk_cloud/include",
+        },
+    });
+
+    std.log.info("Added single C source file for testing: platform/7628/7628.c", .{});
+}
+
+// 添加平台特定的依赖
+fn addPlatformDependencies(b: *std.Build, exe: *std.Build.Step.Compile, platform_name: []const u8) void {
+    const platform_path = std.fmt.allocPrint(b.allocator, "src/platform/{s}", .{platform_name}) catch unreachable;
+
+    // 检查平台目录是否存在
+    var platform_dir = std.fs.cwd().openDir(platform_path, .{}) catch |err| {
+        if (err == error.FileNotFound) {
+            std.log.warn("Platform directory {s} not found, skipping platform-specific libraries", .{platform_path});
+            return;
+        }
+        std.log.err("Failed to open platform directory {s}: {}", .{ platform_path, err });
+        return;
+    };
+    defer platform_dir.close();
+
+    // 添加包含路径
+    const include_base = std.fmt.allocPrint(b.allocator, "{s}/include", .{platform_path}) catch unreachable;
+
+    // 检查并添加各个库的包含路径 (跳过cjson，因为主目录已有)
+    const include_dirs = [_][]const u8{ "curl", "libubox", "modbus" };
+    for (include_dirs) |include_dir| {
+        const full_include_path = std.fmt.allocPrint(b.allocator, "{s}/{s}", .{ include_base, include_dir }) catch unreachable;
+        if (std.fs.cwd().access(full_include_path, .{})) |_| {
+            exe.addIncludePath(b.path(full_include_path));
+        } else |_| {
+            std.log.warn("Include directory {s} not found", .{full_include_path});
+        }
+    }
+
+    // 添加uci.h的包含路径
+    const uci_include_path = std.fmt.allocPrint(b.allocator, "{s}/uci.h", .{include_base}) catch unreachable;
+    if (std.fs.cwd().access(uci_include_path, .{})) |_| {
+        exe.addIncludePath(b.path(include_base));
+    } else |_| {
+        std.log.warn("UCI include path {s} not found", .{uci_include_path});
+    }
+
+    // 检查库目录是否存在
+    const lib_path = std.fmt.allocPrint(b.allocator, "{s}/lib", .{platform_path}) catch unreachable;
+    var lib_dir = std.fs.cwd().openDir(lib_path, .{}) catch |err| {
+        if (err == error.FileNotFound) {
+            std.log.warn("Library directory {s} not found, skipping library linking", .{lib_path});
+            return;
+        }
+        std.log.err("Failed to open library directory {s}: {}", .{ lib_path, err });
+        return;
+    };
+    defer lib_dir.close();
+
+    // 设置库路径
+    const library_path = b.path(lib_path);
+    exe.addLibraryPath(library_path);
+
+    // 定义需要链接的库
+    const libraries = [_][]const u8{
+        "cjson",
+        "curl",
+        "modbus",
+        "ubox",
+        "ubus",
+        "uci",
+    };
+
+    // 链接系统库
+    for (libraries) |lib_name| {
+        exe.linkSystemLibrary(lib_name);
+        std.log.info("Linked system library: {s}", .{lib_name});
+    }
+
+    // 为交叉编译添加必要的链接选项
+    exe.linkLibC();
+
+    std.log.info("Cross-compiling to {s}, linked system libraries with library path", .{platform_name});
 }

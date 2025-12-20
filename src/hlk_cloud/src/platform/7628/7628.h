@@ -1,0 +1,15 @@
+#ifndef _H_HLK_PRODUCT_MT7628_H_
+#define _H_HLK_PRODUCT_MT7628_H_ 
+
+#include <stddef.h>
+
+// MTD设备相关常量 - MT7628 特定配置
+#define MTD_DEVICE_PATH "/dev/mtd3"
+#define LICENSE_OFFSET 0x2000
+#define LICENSE_SIZE 0x2000
+
+// 函数声明
+extern int cfmGetLicense_mt7628(char *DN_, char *PjK_, char *PdK_, char *PdS_, char *DS_, size_t size_);
+extern int cfmSetLicense_mt7628(const char *DN_, const char *PjK_, const char *PdK_, const char *PdS_, const char *DS_);
+
+#endif
