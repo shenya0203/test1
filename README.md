@@ -112,7 +112,9 @@ Run `zig build test` to run the tests.
 
 ### 1. Build the Binary
 ```bash
-C:\zig\zig.exe build openwrt
+C:\zig\zig.exe build openwrt  #build for MT7981 SOC
+C:\zig\zig.exe build mt7688   #build for MT7688 SOC
+C:\zig\zig.exe build mt7621   #build for MT7621 SOC
 ```
 
 ### 2. Transfer to Router
