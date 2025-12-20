@@ -1,49 +1,43 @@
-// 导入Zig标准库，这是Zang语言的核心库，包含了各种基础功能
-// @import() 是Zig的导入语法，类似于其他语言的 import/require
-// std 是标准库的常规别名，包含调试、内存管理、数据结构等功能
+// 导入Zig标准库
 const std = @import("std");
 
-// 导入本地模块 "test1"，这应该是指向 src/test1.zig 或 src/test1/ 目录
-// Zig支持模块化编程，可以将代码组织到不同的文件中
-const test1 = @import("test1");
+// 导入 C 函数声明
+// extern 表示这是外部函数声明，通常用于 C 函数
+// "c" 表示 C 调用约定
+extern "c" fn start_modbus_collector(argc: c_int, argv: [*c][*c]u8) c_int;
 
 // 定义主函数 main()
-// pub: 公开可见性修饰符，表示这个函数可以被其他模块访问
-// fn: 函数定义关键字
-// main: 特殊函数名，程序入口点
-// !void: 错误联合类型，!表示可能返回错误，void表示无返回值
-// 这意味着函数可能成功执行(返回void)或返回一个错误
 pub fn main() !void {
-    // 获取当前目标信息（编译目标的详细信息）
-    // @import("builtin"): 导入Zig内置模块，包含编译时信息
-    // .target: 访问builtin模块的target字段，包含CPU架构、操作系统、ABI等信息
-    const target = @import("builtin").target;
+    // 获取命令行参数
+    var args = try std.process.argsWithAllocator(std.heap.page_allocator);
+    defer args.deinit();
 
-    // 使用标准库的调试打印函数输出信息
-    // std.debug.print(): 调试打印函数，仅在调试模式下工作
-    // "Hello OpenWrt!\n": 格式化字符串，\n表示换行符
-    // .{}: 空的参数列表，因为没有格式化占位符需要替换
-    std.debug.print("Hello OpenWrt!\n", .{});
+    // 计算参数数量
+    var argc: usize = 0;
+    var arg_iter = args;
+    while (arg_iter.next()) |_| {
+        argc += 1;
+    }
 
-    // 打印CPU架构信息
-    // {s}: 字符串格式化占位符
-    // .{@tagName(target.cpu.arch)}: 参数列表
-    // target.cpu.arch: 获取目标的CPU架构枚举值
-    // @tagName(): 将枚举值转换为其字符串名称
-    std.debug.print("CPU Architecture: {s}\n", .{@tagName(target.cpu.arch)});
+    // 重新创建参数数组以传递给 C 函数
+    var argv = try std.heap.page_allocator.alloc([*c]u8, argc);
+    defer std.heap.page_allocator.free(argv);
 
-    // 打印操作系统信息
-    // target.os.tag: 获取目标操作系统枚举值
-    std.debug.print("OS: {s}\n", .{@tagName(target.os.tag)});
+    // 重置参数迭代器
+    args = try std.process.argsWithAllocator(std.heap.page_allocator);
 
-    // 打印ABI(应用程序二进制接口)信息
-    // target.abi: 获取目标的ABI枚举值
-    std.debug.print("ABI: {s}\n", .{@tagName(target.abi)});
+    // 填充 argv 数组
+    var i: usize = 0;
+    while (args.next()) |arg| {
+        argv[i] = @constCast(arg.ptr);
+        i += 1;
+    }
 
-    // 调用test1模块中的bufferedPrint函数
-    // try: 错误处理关键字，如果函数返回错误则立即传播错误
-    // 这相当于其他语言中的异常处理，但更轻量级
-    try test1.bufferedPrint();
+    // 调用 C 函数
+    const result = start_modbus_collector(@intCast(argc), argv.ptr);
+
+    // 根据返回值退出
+    std.process.exit(@intCast(result));
 }
 
 // 定义一个测试用例，名称为 "simple test"

@@ -8,8 +8,7 @@ pub fn build(b: *std.Build) void {
     const mt7688_target_query = b.resolveTargetQuery(.{
         .cpu_arch = .mipsel, // MIPS 小端序
         .os_tag = .linux, // 运行 Linux
-        .abi = .musl, // OpenWrt 强制使用 musl 以实现静态链接
-        .cpu_model = .{ .explicit = &std.Target.mips.cpu.mips32r2 }, // 适配 MT7688 内核
+        .abi = .musleabi, // 使用musl ABI
     });
 
     // 1. 定义 MT7621 的目标查询
@@ -17,7 +16,7 @@ pub fn build(b: *std.Build) void {
     const mt7621_target_query = b.resolveTargetQuery(.{
         .cpu_arch = .mipsel,
         .os_tag = .linux,
-        .abi = .musl, // LEDE/OpenWrt 统一使用 musl
+        .abi = .musleabi, // LEDE/OpenWrt 统一使用 musl
         // Zig 内部 mips32r2 是最匹配 MT7621 (1004Kc) 的指令集选项
         .cpu_model = .{ .explicit = &std.Target.mips.cpu.mips32r2 },
     });
@@ -34,7 +33,7 @@ pub fn build(b: *std.Build) void {
 
     // 1. 确定常规构建的目标 (zig build)
     const actual_target = if (openwrt_target)
-        b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .musl })
+        b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .musleabihf })
     else
         target;
 
@@ -61,7 +60,7 @@ pub fn build(b: *std.Build) void {
     // 这里我们强制应用所有瘦身策略，确保生成的二进制文件最小
     // ============================================================
     const openwrt_step = b.step("openwrt", "Build for OpenWrt (Production Ready: Small & Stripped)");
-    const openwrt_target_query = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .musl });
+    const openwrt_target_query = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .musleabihf });
 
     const openwrt_exe = b.addExecutable(.{
         .name = "test1",
@@ -93,7 +92,7 @@ pub fn build(b: *std.Build) void {
     const mt7688_step = b.step("mt7688", "Build for MT7688 OpenWrt (Small & Stripped)");
 
     const mt7688_exe = b.addExecutable(.{
-        .name = "test1_mt7688",
+        .name = "modbus_collector_mt7688",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = mt7688_target_query,
@@ -108,6 +107,47 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+
+    // 为 MT7688 添加 C 代码编译
+    const mt7688_c_files = [_][]const u8{
+        "src/c_code/modbus_collector.c",
+        "src/c_code/shm_lookup.c",
+        "src/c_code/shm_protocol.c",
+    };
+
+    // 添加 C 文件到 MT7688 可执行文件
+    for (mt7688_c_files) |c_file| {
+        mt7688_exe.addCSourceFile(.{
+            .file = b.path(c_file),
+            .flags = &.{
+                "-std=gnu99",
+                "-Wall",
+                "-Wextra",
+                "-O2",
+                "-D__MUSL__", // 强制使用musl兼容的函数
+                "-D_TIME_BITS=32", // 强制使用32位时间函数
+                "-D_FILE_OFFSET_BITS=32", // 强制使用32位文件偏移
+                "-I",
+                "src/c_code/include/openwrt/include",
+                "-I",
+                "src/c_code/include/openwrt/include/libubox",
+                "-I",
+                "src/c_code/include/openwrt/include/modbus",
+                "-I",
+                "src/c_code/include/openwrt/include/cjson",
+            },
+        });
+    }
+
+    // 添加库搜索路径
+    mt7688_exe.addLibraryPath(b.path("src/c_code/include/openwrt/lib"));
+
+    // 链接 OpenWrt 库
+    mt7688_exe.linkSystemLibrary("pthread");
+    mt7688_exe.linkSystemLibrary("modbus");
+    mt7688_exe.linkSystemLibrary("uci");
+    mt7688_exe.linkSystemLibrary("cjson");
+    mt7688_exe.linkSystemLibrary("ubox");
 
     // 将产物安装到 zig-out/mt7688/ 目录下
     const mt7688_install = b.addInstallArtifact(mt7688_exe, .{
