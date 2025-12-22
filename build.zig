@@ -65,6 +65,14 @@ pub fn build(b: *std.Build) void {
         createPlatformBuildStep(b, platform, mod);
     }
 
+    // 生成通用的版本头文件（在默认构建时生成）
+    //const default_version_file = "src/hlk_cloud/src/include/hi_cfm_version.h";
+    //if (std.fs.cwd().statFile(default_version_file)) |_| {
+    //    std.log.info("Default version header already exists: {s}", .{default_version_file});
+    //} else |_| {
+    //    generateVersionHeader(b, "HLK", default_version_file);
+    //}
+
     // 默认构建步骤 (用于开发和测试)
     const exe = b.addExecutable(.{
         .name = "hlk_cloud",
@@ -97,14 +105,30 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_exe_tests.step);
+
+    // 清理步骤
+    const clean_step = b.step("clean", "Clean build artifacts");
+    clean_step.dependOn(&b.addRemoveDirTree(.{ .cwd_relative = "zig-out" }).step);
+    clean_step.dependOn(&b.addRemoveDirTree(.{ .cwd_relative = ".zig-cache" }).step);
 }
 
 // 为特定平台创建构建步骤
 fn createPlatformBuildStep(b: *std.Build, platform: PlatformConfig, mod: *std.Build.Module) void {
     const step = b.step(platform.name, std.fmt.allocPrint(b.allocator, "Build for {s} ({s})", .{ platform.name, platform.product_id }) catch unreachable);
 
-    // 生成版本头文件
-    const version_header_step = generateVersionHeader(b, platform.product_id);
+    // 为当前平台生成版本头文件（如果不存在）
+    const version_file_path = std.fmt.allocPrint(b.allocator, "src/hlk_cloud/src/include/hi_cfm_version_{s}.h", .{platform.name}) catch unreachable;
+
+    // 使用 WriteFile 步骤来生成版本头文件，确保只在需要时生成
+    const version_step = b.addWriteFile(version_file_path, "");
+    step.dependOn(&version_step.step);
+
+    // 只有当文件不存在时才生成新的版本头文件
+    if (std.fs.cwd().statFile(version_file_path)) |_| {
+        std.log.info("Version header already exists: {s}", .{version_file_path});
+    } else |_| {
+        generateVersionHeader(b, platform.product_id, version_file_path);
+    }
 
     // 创建可执行文件
     const exe = b.addExecutable(.{
@@ -125,8 +149,7 @@ fn createPlatformBuildStep(b: *std.Build, platform: PlatformConfig, mod: *std.Bu
     // 对于交叉编译，允许未定义符号（动态库在目标系统上提供）
     exe.linker_allow_shlib_undefined = true;
 
-    // 添加构建依赖：先生成头文件，再编译
-    exe.step.dependOn(&version_header_step.step);
+    // 头文件依赖已在上面添加
 
     // 添加C源文件
     addCSourceFiles(b, exe, platform.product_id, platform.macro);
@@ -142,17 +165,62 @@ fn createPlatformBuildStep(b: *std.Build, platform: PlatformConfig, mod: *std.Bu
 }
 
 // 生成版本头文件
-fn generateVersionHeader(b: *std.Build, product_id: []const u8) *std.Build.Step.WriteFile {
-    // 使用固定的日期格式 (可以后续改进为动态日期)
-    const date_str = "20241220";
+fn generateVersionHeader(b: *std.Build, product_id: []const u8, file_path: []const u8) void {
+    // 使用系统命令获取当前日期 (Windows兼容)
+    const result = std.process.Child.run(.{
+        .allocator = b.allocator,
+        .argv = &[_][]const u8{ "powershell", "-Command", "Get-Date -Format 'yyMMdd.HHmmss'" },
+        .cwd = ".",
+    }) catch |err| {
+        std.log.err("Failed to get current date: {}", .{err});
+        // 回退到固定日期
+        const version_content = std.fmt.allocPrint(b.allocator, "#define AT_VERSION \"{s}-1.0.0-{s}\"\n", .{ product_id, "20251222" }) catch unreachable;
+
+        std.fs.cwd().writeFile(.{
+            .sub_path = file_path,
+            .data = version_content,
+        }) catch |write_err| {
+            std.log.err("Failed to write version header file {s}: {}", .{ file_path, write_err });
+            std.process.exit(1);
+        };
+        std.log.info("Generated version header: {s}", .{file_path});
+        return;
+    };
+    defer b.allocator.free(result.stdout);
+    defer b.allocator.free(result.stderr);
+
+    if (result.term.Exited != 0) {
+        std.log.err("Command failed with exit code {}", .{result.term.Exited});
+        // 回退到固定日期
+        const version_content = std.fmt.allocPrint(b.allocator, "#define AT_VERSION \"{s}-1.0.0-{s}\"\n", .{ product_id, "20251222" }) catch unreachable;
+
+        std.fs.cwd().writeFile(.{
+            .sub_path = file_path,
+            .data = version_content,
+        }) catch |write_err| {
+            std.log.err("Failed to write version header file {s}: {}", .{ file_path, write_err });
+            std.process.exit(1);
+        };
+        std.log.info("Generated version header: {s}", .{file_path});
+        return;
+    }
+
+    // 移除换行符和空格
+    const date_str_raw = std.mem.trim(u8, result.stdout, " \t\r\n");
+    const date_str = std.fmt.allocPrint(b.allocator, "{s}", .{date_str_raw}) catch unreachable;
 
     // 生成版本字符串
     const version_content = std.fmt.allocPrint(b.allocator, "#define AT_VERSION \"{s}-1.0.0-{s}\"\n", .{ product_id, date_str }) catch unreachable;
 
-    // 创建写入文件步骤 (放到include目录，这样include "hi_cfm_version.h" 就能找到)
-    const write_file = b.addWriteFile("src/hlk_cloud/src/include/hi_cfm_version.h", version_content);
-
-    return write_file;
+    // 直接写入文件
+    std.fs.cwd().writeFile(.{
+        .sub_path = file_path,
+        .data = version_content,
+    }) catch |err| {
+        std.log.err("Failed to write version header file {s}: {}", .{ file_path, err });
+        std.process.exit(1);
+    };
+    std.log.info("Generated version header: {s}", .{file_path});
 }
 
 // 添加C源文件
@@ -327,7 +395,7 @@ fn addPlatformDependencies(b: *std.Build, exe: *std.Build.Step.Compile, platform
     const libraries = [_][]const u8{
         "cjson",
         "curl",
-        "modbus",
+        //"modbus",
         "ubox",
         "ubus",
         "uci",
