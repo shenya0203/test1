@@ -7,6 +7,133 @@ const std = @import("std");
 extern "c" fn hi_link_init() c_int;
 extern "c" fn sleep(seconds: c_uint) c_int;
 
+// 直接声明C库的休眠函数
+extern "c" fn usleep(microseconds: c_uint) c_int;
+
+// 毫秒级休眠函数 - Zig实现，避免C ABI兼容性问题
+export fn zig_msleep(msec: c_uint) void {
+    // 直接使用C库的usleep函数，参数是微秒
+    const usecs = msec * 1000;
+    _ = usleep(usecs);
+}
+
+// 直接声明C库的时间函数
+extern "c" fn time(timer: ?*std.c.time_t) std.c.time_t;
+
+// 定义timeval结构体，与C兼容
+pub const ZigTimeval = extern struct {
+    tv_sec: std.c.time_t,
+    tv_usec: std.c.suseconds_t,
+};
+
+// 定义fd_set结构体（简化版本）
+pub const ZigFdSet = extern struct {
+    fds_bits: [16]u32, // 通常fd_set有1024位，这里简化
+};
+
+// 直接声明C库函数
+extern "c" fn gettimeofday(tv: ?*std.c.timeval, tz: ?*std.c.timezone) c_int;
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn tzset() void;
+
+// gettimeofday的Zig实现
+export fn zig_gettimeofday(tv: *ZigTimeval, tz: ?*anyopaque) c_int {
+    // 使用C库的gettimeofday实现
+    const result = gettimeofday(@as(?*std.c.timeval, @ptrCast(@alignCast(tv))), @as(?*std.c.timezone, @ptrCast(@alignCast(tz))));
+    return result;
+}
+
+// 定义fd_set类型
+const fd_set = extern struct {
+    fds_bits: [16]u32,
+};
+
+// 直接声明C库函数
+extern "c" fn select(nfds: c_int, readfds: ?*fd_set, writefds: ?*fd_set, exceptfds: ?*fd_set, timeout: ?*std.c.timeval) c_int;
+
+// select的Zig实现
+export fn zig_select(nfds: c_int, readfds: ?*ZigFdSet, writefds: ?*ZigFdSet, exceptfds: ?*ZigFdSet, timeout: ?*ZigTimeval) c_int {
+    // 使用C库的select实现
+    const result = select(nfds, @as(?*fd_set, @ptrCast(readfds)), @as(?*fd_set, @ptrCast(writefds)), @as(?*fd_set, @ptrCast(exceptfds)), @as(?*std.c.timeval, @ptrCast(@alignCast(timeout))));
+    return result;
+}
+
+// fd_set操作函数
+export fn zig_FD_ZERO(set: *ZigFdSet) void {
+    @memset(&set.fds_bits, 0);
+}
+
+export fn zig_FD_SET(fd: c_int, set: *ZigFdSet) void {
+    if (fd >= 0 and fd < 512) { // 假设最大512个文件描述符
+        const idx = @as(usize, @intCast(fd)) / 32;
+        const bit = @as(u5, @intCast(@as(u32, @intCast(fd)) % 32)); // 修复：确保bit是u5类型
+        set.fds_bits[idx] |= (@as(u32, 1) << bit);
+    }
+}
+
+export fn zig_FD_ISSET(fd: c_int, set: *ZigFdSet) c_int {
+    if (fd >= 0 and fd < 512) {
+        const idx = @as(usize, @intCast(fd)) / 32;
+        const bit = @as(u5, @intCast(@as(u32, @intCast(fd)) % 32)); // 修复：确保bit是u5类型
+        return if ((set.fds_bits[idx] & (@as(u32, 1) << bit)) != 0) 1 else 0;
+    }
+    return 0;
+}
+
+// 获取当前时间戳 - Zig实现，避免C ABI兼容性问题
+export fn zig_get_timestamp() i64 {
+    // 使用C库的time函数获取当前时间戳
+    const now = time(null);
+    return @intCast(now);
+}
+
+// 设置时区环境变量 - Zig实现，避免C ABI兼容性问题
+export fn zig_set_timezone(tz: [*:0]const u8) c_int {
+    // 使用C库的setenv函数设置TZ环境变量
+    const result = setenv("TZ", tz, 1);
+    if (result == 0) {
+        // 设置成功后调用tzset更新时区信息
+        tzset();
+    }
+    return result;
+}
+
+// 使用system()设置时区 - 直接调用，避免setenv/tzset问题
+extern "c" fn system(command: [*:0]const u8) c_int;
+
+export fn zig_set_timezone_system(_: [*:0]const u8) c_int {
+    // 直接使用system()调用设置时区环境变量
+    // 格式: TZ=CST-8; export TZ
+    _ = system("TZ=CST-8; export TZ");
+    return 0; // system()总是返回0表示成功
+}
+
+// 计算两个时间戳的绝对差值 - Zig实现，避免fabs阻塞
+export fn zig_time_diff_abs(time1: i64, time2: i64) i64 {
+    if (time1 > time2) {
+        return time1 - time2;
+    } else {
+        return time2 - time1;
+    }
+}
+
+// 设置系统时间同步 - Zig实现，使用system()调用避免settimeofday阻塞
+export fn zig_set_timesync(timestamp: i64) c_int {
+    // 将毫秒时间戳转换为秒
+    const seconds = @divTrunc(timestamp, 1000);
+
+    // 构建date命令来设置系统时间
+    // 格式: date -s "@timestamp_in_seconds"
+    var cmd_buf: [64]u8 = undefined;
+    const cmd = std.fmt.bufPrint(&cmd_buf, "date -s \"@{d}\"", .{seconds}) catch {
+        return -1; // 格式化失败
+    };
+
+    // 使用system()调用执行date命令
+    const result = system(@as([*:0]const u8, @ptrCast(cmd.ptr)));
+    return result;
+}
+
 // 定义主函数 main()
 pub fn main() !void {
     // 调用 C 函数启动MQTT主程序

@@ -4,7 +4,7 @@
 #include <stddef.h>
 
 // MTD设备相关常量 - MT7628 特定配置
-#define MTD_DEVICE_PATH "/dev/mtd3"
+#define MTD_DEVICE_PATH "/dev/mtd2"
 #define LICENSE_OFFSET 0x2000
 #define LICENSE_SIZE 0x2000
 

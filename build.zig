@@ -23,6 +23,7 @@ pub fn build(b: *std.Build) void {
                 .cpu_arch = .mipsel,
                 .os_tag = .linux,
                 .abi = .musleabi,
+                .cpu_model = .{ .explicit = &std.Target.mips.cpu.mips32r2 },
             },
             .macro = "HLK_PRODUCT_7628",
             .single_threaded = true, // MT7688 是单核 CPU
@@ -166,9 +167,12 @@ fn addCSourceFiles(b: *std.Build, exe: *std.Build.Step.Compile, product_id: []co
         "-DSUPPORT_OPENWRT",
         "-DENABLE_CURL",
         "-D__MUSL__", // 明确标识为Musl环境
-        // 移除所有_TIME_BITS设置，让编译器使用默认的64位行为
-        "-D_FILE_OFFSET_BITS=64", // 使用64位文件偏移
-        "-D_LARGEFILE64_SOURCE",
+        // 强制32位时间ABI兼容性 (与GCC 8.4 musl legacy环境匹配)
+        "-U_TIME_BITS", // 取消默认的_TIME_BITS定义
+        "-D_TIME_BITS=32", // 强制使用32位时间类型
+        "-D_FILE_OFFSET_BITS=32", // 强制使用32位文件偏移
+        "-D__USE_TIME_BITS64=0", // 明确禁用64位时间
+        "-D_SYSCALL_WORDSIZE=32", // 强制32位系统调用
         std.fmt.allocPrint(allocator, "-D{s}", .{macro}) catch unreachable,
     };
 
@@ -264,25 +268,6 @@ fn addCSourcesFromDir(allocator: std.mem.Allocator, files: *std.ArrayList([]cons
             }
         }
     }
-}
-
-// 只添加一个简单的C文件用于测试
-fn addCSingleCFile(b: *std.Build, exe: *std.Build.Step.Compile, product_id: []const u8, macro: []const u8) void {
-    _ = product_id; // 暂时不使用
-
-    // 只添加一个简单的C文件来测试
-    exe.addCSourceFile(.{
-        .file = b.path("src/hlk_cloud/src/platform/7628/7628.c"),
-        .flags = &.{
-            "-std=gnu99",
-            "-DSUPPORT_OPENWRT",
-            std.fmt.allocPrint(b.allocator, "-D{s}", .{macro}) catch unreachable,
-            "-I",
-            "src/hlk_cloud/include",
-        },
-    });
-
-    std.log.info("Added single C source file for testing: platform/7628/7628.c", .{});
 }
 
 // 添加平台特定的依赖

@@ -19,6 +19,7 @@
 #include <fcntl.h>       // 添加fcntl相关函数
 #include "MQTTLinux.h"
 #include "hi_link.h"
+#include "app_api.h"     // 包含Zig实现的函数声明
 void TimerInit(Timer* timer)
 {
 	timer->end_time = (struct timeval){0, 0};
@@ -26,8 +27,8 @@ void TimerInit(Timer* timer)
 
 char TimerIsExpired(Timer* timer)
 {
-	struct timeval now, res;
-	gettimeofday(&now, NULL);
+	zig_timeval now, res;
+	zig_gettimeofday(&now, NULL);
 	timersub(&timer->end_time, &now, &res);
 	return res.tv_sec < 0 || (res.tv_sec == 0 && res.tv_usec <= 0);
 }
@@ -35,8 +36,8 @@ char TimerIsExpired(Timer* timer)
 
 void TimerCountdownMS(Timer* timer, unsigned int timeout)
 {
-	struct timeval now;
-	gettimeofday(&now, NULL);
+	zig_timeval now;
+	zig_gettimeofday(&now, NULL);
 	struct timeval interval = {timeout / 1000, (timeout % 1000) * 1000};
 	timeradd(&now, &interval, &timer->end_time);
 }
@@ -44,8 +45,8 @@ void TimerCountdownMS(Timer* timer, unsigned int timeout)
 
 void TimerCountdown(Timer* timer, unsigned int timeout)
 {
-	struct timeval now;
-	gettimeofday(&now, NULL);
+	zig_timeval now;
+	zig_gettimeofday(&now, NULL);
 	struct timeval interval = {timeout, 0};
 	timeradd(&now, &interval, &timer->end_time);
 }
@@ -53,8 +54,8 @@ void TimerCountdown(Timer* timer, unsigned int timeout)
 
 int TimerLeftMS(Timer* timer)
 {
-	struct timeval now, res;
-	gettimeofday(&now, NULL);
+	zig_timeval now, res;
+	zig_gettimeofday(&now, NULL);
 	timersub(&timer->end_time, &now, &res);
 	//printf("left %d ms\n", (res.tv_sec < 0) ? 0 : res.tv_sec * 1000 + res.tv_usec / 1000);
 	return (res.tv_sec < 0) ? 0 : res.tv_sec * 1000 + res.tv_usec / 1000;
@@ -86,14 +87,14 @@ int linux_read(Network* n, unsigned char* buffer, int len, int timeout_ms)
 	}
 
 	int bytes = 0;
-	struct timeval start_time, current_time;
-	gettimeofday(&start_time, NULL);
+	zig_timeval start_time, current_time;
+	zig_gettimeofday(&start_time, NULL);
 
 	while (bytes < len)
 	{
 		// 计算剩余超时时间
-		gettimeofday(&current_time, NULL);
-		long elapsed_ms = (current_time.tv_sec - start_time.tv_sec) * 1000 + 
+		zig_gettimeofday(&current_time, NULL);
+		long elapsed_ms = (current_time.tv_sec - start_time.tv_sec) * 1000 +
 						 (current_time.tv_usec - start_time.tv_usec) / 1000;
 		long remaining_ms = timeout_ms - elapsed_ms;
 
@@ -103,17 +104,17 @@ int linux_read(Network* n, unsigned char* buffer, int len, int timeout_ms)
 		}
 
 		// 准备select参数
-		fd_set read_fds;
-		struct timeval timeout;
-		
+		zig_fd_set read_fds;
+		zig_timeval timeout;
+
 		timeout.tv_sec = remaining_ms / 1000;
 		timeout.tv_usec = (remaining_ms % 1000) * 1000;
 
-		FD_ZERO(&read_fds);
-		FD_SET(n->my_socket, &read_fds);
+		zig_FD_ZERO(&read_fds);
+		zig_FD_SET(n->my_socket, &read_fds);
 
-		// 使用select等待socket可读
-		int select_result = select(n->my_socket + 1, &read_fds, NULL, NULL, &timeout);
+		// 使用zig实现的select等待socket可读
+		int select_result = zig_select(n->my_socket + 1, &read_fds, NULL, NULL, &timeout);
 
 		if (select_result == -1)
 		{
@@ -128,7 +129,7 @@ int linux_read(Network* n, unsigned char* buffer, int len, int timeout_ms)
 		}
 
 		// 检查socket是否可读
-		if (FD_ISSET(n->my_socket, &read_fds))
+		if (zig_FD_ISSET(n->my_socket, &read_fds))
 		{
 			int rc = recv(n->my_socket, &buffer[bytes], (size_t)(len - bytes), MSG_DONTWAIT);
 			int saved_errno = errno;

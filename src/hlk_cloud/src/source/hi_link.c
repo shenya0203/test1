@@ -541,7 +541,7 @@ static void *hlk_user_main(void *arg)
     
 	/* 等待系统初始化完成 */
 	printf("hlk_user_main\r\n");
-	app_msleep(U2C_INTERVAL);
+	//app_msleep(U2C_INTERVAL);
 	printf("hlk_user_main 2\r\n");
 	
     int rc = 0;
@@ -573,9 +573,9 @@ static void *hlk_user_main(void *arg)
 
 	/* 创建socket处理线程 */
 	if((rc = pthread_create(&thread[0], NULL, socket_main, (void *)&sharedData)) != 0) 
-		PRF(" pthread_create failed !\n");
+		PRF(" socket thread create failed !\n");
 	else
-		PRF(" pthread_create success !\n");
+		PRF(" socket thread create success !\n");
 
 	/* 执行测试循环 */
 	for (i = 0; i < options.iterations; ++i){

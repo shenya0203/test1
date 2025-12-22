@@ -203,29 +203,8 @@ int conver_str2hex(char *in, int in_len, char *out, int out_len)
  ******************************************************************************/
 void app_msleep(unsigned int msec)
 {
-    struct timespec tm;
-
-    // 将毫秒转换为秒和纳秒
-    tm.tv_sec = (time_t)(msec / 1000*1000);              // 秒数部分
-    tm.tv_nsec = (msec % 1000) * 1000 * 1000;       // 纳秒部分（毫秒*1000*1000）
-
-    // 尝试使用nanosleep进行精确休眠
-    printf("tm.tv_sec: %d, tm.tv_nsec: %d\n", tm.tv_sec, tm.tv_nsec);
-    if (0 > nanosleep(&tm, NULL))
-    {
-        // nanosleep失败时使用备用休眠函数
-        #ifdef HLK_PRODUCT_WR10
-        hi_os_msleep(msec);
-        #else
-        struct timeval tv;
-        tv.tv_sec = msec / 1000*1000;
-        tv.tv_usec  = (msec % 1000) * 1000000L; // 毫秒转纳秒
-
-        select(0, NULL ,NULL, NULL, &tv);
-        #endif
-    }
-
-    return;
+    // 直接使用Zig实现的休眠函数，避免C ABI兼容性问题
+    zig_msleep(msec);
 }
 
  /******************************************************************************
@@ -244,7 +223,7 @@ void app_msleep(unsigned int msec)
  ******************************************************************************/
 uint32_t hlk_sntp_time_get(void)
 {
-    return (uint32_t)time(NULL);  // 获取当前Unix时间戳
+    return (uint32_t)zig_get_timestamp();  // 获取当前Unix时间戳
 }
 
 /******************************************************************************
@@ -542,7 +521,7 @@ void get_utc_time_info(unsigned long *utc_time)
     time_t timesnow;
     
     // 获取当前时间
-    timesnow = time(NULL);
+    timesnow = zig_get_timestamp();
     
     // 将时间戳赋值给输出参数
     *utc_time = timesnow;
@@ -880,11 +859,11 @@ int message_print(char* fmt, ...)
     char    datetime[1024] = {'\0'};         // 时间戳字符串缓冲区
     int ret = 0;                            // 函数返回值
     va_list ap;                             // 可变参数列表
-    struct timeval t;                       // 时间值结构体（包含微秒）
+    zig_timeval t;                       // 时间值结构体（包含微秒）
     char *saferet = NULL;                   // 安全操作返回值指针
     
-    // 获取当前系统时间（包含微秒精度）
-    gettimeofday(&t, NULL);
+    // 获取当前系统时间（包含微秒精度）- 使用Zig实现避免ABI问题
+    zig_gettimeofday(&t, NULL);
     
     // 将时间戳转换为本地时间结构
     struct tm * ptm = localtime(&t.tv_sec);

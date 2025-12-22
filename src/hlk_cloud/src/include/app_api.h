@@ -38,6 +38,44 @@ extern int conver_hex2str(char *in, int in_len, char *out, int out_len);
 extern int conver_str2hex(char *in, int in_len, char *out, int out_len);
 
 extern void app_msleep(unsigned int msec);
+
+// Zig实现的毫秒休眠函数，避免C ABI兼容性问题
+extern void zig_msleep(unsigned int msec);
+
+// Zig实现的时间戳获取函数，避免C ABI兼容性问题
+extern long long zig_get_timestamp(void);
+
+// Zig实现的时区设置函数，避免C ABI兼容性问题
+extern int zig_set_timezone(const char *tz);
+
+// Zig实现的system()时区设置函数，直接使用system调用
+extern int zig_set_timezone_system(const char *tz);
+
+// Zig实现的绝对时间差值计算函数，避免fabs阻塞
+extern long long zig_time_diff_abs(long long time1, long long time2);
+
+// Zig实现的时间同步设置函数，避免C ABI兼容性问题
+extern int zig_set_timesync(long long timestamp);
+
+// Zig实现的gettimeofday函数，避免C ABI兼容性问题
+typedef struct {
+    long tv_sec;
+    long tv_usec;
+} zig_timeval;
+
+extern int zig_gettimeofday(zig_timeval *tv, void *tz);
+
+// Zig实现的select函数，避免C ABI兼容性问题
+typedef struct {
+    unsigned int fds_bits[16];
+} zig_fd_set;
+
+extern int zig_select(int nfds, zig_fd_set *readfds, zig_fd_set *writefds, zig_fd_set *exceptfds, zig_timeval *timeout);
+
+// fd_set操作函数
+extern void zig_FD_ZERO(zig_fd_set *set);
+extern void zig_FD_SET(int fd, zig_fd_set *set);
+extern int zig_FD_ISSET(int fd, zig_fd_set *set);
 extern uint32_t hlk_sntp_time_get(void);
 
 extern void get_mem_info(unsigned long *total_memory,unsigned long *free_memory);

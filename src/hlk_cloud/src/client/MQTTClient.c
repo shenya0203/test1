@@ -364,8 +364,7 @@ int MQTTYield(MQTTClient* c, int timeout_ms)
     TimerInit(&timer);
     TimerCountdownMS(&timer, timeout_ms);
 
-	  do
-    {
+	do {
         if (cycle(c, &timer) < 0)
         {
             rc = FAILURE;

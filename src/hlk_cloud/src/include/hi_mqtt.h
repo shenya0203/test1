@@ -69,7 +69,7 @@ extern "C" {
 #endif
 
 #if defined(HLK_PRODUCT_WR10) || defined(HLK_PRODUCT_7628)
-#define WAN_INTERFACE          "br0"
+#define WAN_INTERFACE          "br-lan"
 #elif defined(HLK_PRODUCT_RM65)
 #define WAN_INTERFACE          "br-lan"
 #else

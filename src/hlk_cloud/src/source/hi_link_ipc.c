@@ -255,7 +255,7 @@ int hi_link_ipc_register_client_channel(int client_fd, const char *client_id, co
         client->fd = client_fd;
         strncpy(client->client_id, client_id, sizeof(client->client_id) - 1);
         client->channel_count = 0;
-        client->connect_time = time(NULL);
+        client->connect_time = zig_get_timestamp();
         client->active = true;
     }
     
@@ -516,7 +516,7 @@ static cJSON* handle_register_listener(int client_fd, cJSON *params)
     cJSON_AddBoolToObject(result, "success", registered_count > 0);
     cJSON_AddStringToObject(result, "client_id", client_id);
     cJSON_AddNumberToObject(result, "registered_channels", registered_count);
-    cJSON_AddNumberToObject(result, "timestamp", (double)time(NULL));
+    cJSON_AddNumberToObject(result, "timestamp", (double)zig_get_timestamp());
 
     if (registered_count == 0) {
         cJSON_AddStringToObject(result, "error", "没有成功注册任何通道");
@@ -741,7 +741,7 @@ static char *build_cloud_data(const char *channel_name, const cJSON *channel_val
     int ret = 0;
     cJSON *root = cJSON_CreateObject();
     cJSON *input_data = cJSON_CreateObject();
-    time_t now = time(NULL);
+    time_t now = zig_get_timestamp();
     char *response_str = NULL;
     
     if (!root || !input_data) {

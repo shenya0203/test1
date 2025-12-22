@@ -25,35 +25,44 @@
 #ifdef __MUSL__
 
 // Forward the __*time64 calls to standard musl functions
+// Use default visibility to ensure these functions are exported for linking
+__attribute__((visibility("default")))
 int __nanosleep_time64(const struct timespec *req, struct timespec *rem) {
     return nanosleep(req, rem);
 }
 
+__attribute__((visibility("default")))
 int __select_time64(int nfds, fd_set *readfds, fd_set *writefds,
                    fd_set *exceptfds, struct timeval *timeout) {
     return select(nfds, readfds, writefds, exceptfds, timeout);
 }
 
+__attribute__((visibility("default")))
 time_t __time64(time_t *tloc) {
     return time(tloc);
 }
 
+__attribute__((visibility("default")))
 int __gettimeofday_time64(struct timeval *tv, void *tz) {
     return gettimeofday(tv, (struct timezone *)tz);
 }
 
+__attribute__((visibility("default")))
 struct tm *__localtime64(const time_t *timep) {
     return localtime(timep);
 }
 
+__attribute__((visibility("default")))
 time_t __mktime64(struct tm *tm) {
     return mktime(tm);
 }
 
+__attribute__((visibility("default")))
 int __settimeofday_time64(const struct timeval *tv, const struct timezone *tz) {
     return settimeofday(tv, tz);
 }
 
+__attribute__((visibility("default")))
 double __difftime64(time_t time1, time_t time0) {
     return difftime(time1, time0);
 }
@@ -88,6 +97,7 @@ double __difftime64(time_t time1, time_t time0) {
 #include "hi_mqtt.h"             // MQTT相关定义
 #include "hi_link.h"             // 设备连接相关
 #include "hi_link_ipc.h"         // IPC相关定义
+#include "app_api.h"             // Zig实现的函数声明
 #include "app_api.h"             // 应用程序API
 #ifdef HLK_PRODUCT_WR10
 #include "igdCmApi.h"            // 网关管理API
@@ -548,7 +558,7 @@ static void hlk_mqtt_handle_app(MessageData *pdata)
     cJSON_AddStringToObject(pushData, "type", "cloud_data");
     cJSON_AddStringToObject(pushData, "channel", name);
     cJSON_AddItemToObject(pushData, "inputData", cJSON_Duplicate(inputData, 1));
-    cJSON_AddNumberToObject(pushData, "timestamp", time(NULL));
+    cJSON_AddNumberToObject(pushData, "timestamp", zig_get_timestamp());
     
     // 将完整的原始消息也包含进去
     cJSON_AddStringToObject(pushData, "raw_message", str);
@@ -859,6 +869,7 @@ static void hlk_mqtt_handle_ping_reply(MessageData *data)
         goto exit;
     }
 
+
     //服务器时间同步
     unsigned long long utc_time;
     server_time = cJSON_GetObjectItem(root, "ServerTime");
@@ -870,12 +881,9 @@ static void hlk_mqtt_handle_ping_reply(MessageData *data)
     utc_time = server_time->valuedouble;
     if (time_sync == 0)
     {
-        set_timesync(utc_time);
-        setenv("TZ", "CST-8", 1);
-        tzset();
-        
-        // 可选：设置系统级时区（需要root权限）
-        system("echo 'CST-8' > /etc/TZ");
+        zig_set_timesync(utc_time);
+        // 使用Zig实现的system()时区设置，直接调用system避免setenv问题
+        zig_set_timezone_system("CST-8");
         time_sync = 1;
     }
     // 设置消息流量限制（函数已注释）
@@ -1037,13 +1045,13 @@ void set_post_headers(M_HTTP_POST_HEADERS_S *p_m_h_post_headers)
     clock_gettime(CLOCK_REALTIME, &spec);
     current_time = spec.tv_sec * 1000 + spec.tv_nsec / 1000000;
     #elif defined(HLK_PRODUCT_7628)
-    current_time = (unsigned long long)time(NULL)*1000;
+    current_time = (unsigned long long)zig_get_timestamp()*1000;
 
     #endif
 
     // 生成随机数用于请求唯一标识
     int iRandomNumber = 0;
-    srand(time(NULL));       // 设置随机数种子
+    srand(zig_get_timestamp());       // 设置随机数种子
     iRandomNumber = rand();
 
     // 构建MD5签名所需的字符串
@@ -1546,8 +1554,8 @@ int hlk_ota_http(char *server_name, char *path)
     pid_t child_pid;
     int status;
     ota_download_result_t result;
-    fd_set read_fds;
-    struct timeval timeout;
+    zig_fd_set read_fds;
+    zig_timeval timeout;
     int select_result;
     time_t start_time, current_time;
 
@@ -1560,7 +1568,7 @@ int hlk_ota_http(char *server_name, char *path)
     }
     
     // 记录开始时间
-    start_time = time(NULL);
+    start_time = zig_get_timestamp();
     
     // 创建子进程
     child_pid = fork();
@@ -1584,7 +1592,7 @@ int hlk_ota_http(char *server_name, char *path)
         
         // 监听管道和子进程状态
         while (1) {
-            current_time = time(NULL);
+            current_time = zig_get_timestamp();
             
             // 检查是否超时
             if (current_time - start_time > OTA_DOWNLOAD_TIMEOUT) {
@@ -1597,15 +1605,15 @@ int hlk_ota_http(char *server_name, char *path)
                 return CURLE_OPERATION_TIMEDOUT;
             }
             
-            // 使用select监听管道
-            FD_ZERO(&read_fds);
-            FD_SET(pipe_fds[0], &read_fds);
+            // 使用zig实现的select监听管道
+            zig_FD_ZERO(&read_fds);
+            zig_FD_SET(pipe_fds[0], &read_fds);
             timeout.tv_sec = 1;
             timeout.tv_usec = 0;
+
+            select_result = zig_select(pipe_fds[0] + 1, &read_fds, NULL, NULL, &timeout);
             
-            select_result = select(pipe_fds[0] + 1, &read_fds, NULL, NULL, &timeout);
-            
-            if (select_result > 0 && FD_ISSET(pipe_fds[0], &read_fds)) {
+            if (select_result > 0 && zig_FD_ISSET(pipe_fds[0], &read_fds)) {
                 // 有数据可读
                 ssize_t bytes_read = read(pipe_fds[0], &result, sizeof(result));
                 if (bytes_read > 0) {
@@ -1818,8 +1826,8 @@ static void md5_encode(void)
     time_t timesnow;           // 当前时间戳
     char timestamp[32];        // 时间戳字符串
 
-    // 获取当前时间戳
-    timesnow = time(NULL);
+    // 获取当前时间戳 - 使用Zig实现避免ABI兼容性问题
+    timesnow = zig_get_timestamp();
     PRF("timesnow:%lld\n", (long long)timesnow);
     sprintf(timestamp, "%lld", (long long)timesnow);
 
@@ -1887,7 +1895,7 @@ int hlk_MQTTYield(SHARED_DATA_S *sharedData)
     int rc;
     
     time_t time_start, time_ping;
-    time_start = time(NULL);  // 记录开始时间，用于心跳包定时
+    time_start = zig_get_timestamp();  // 记录开始时间，用于心跳包定时
 
     // 初始化操作：订阅主题、发送首次心跳、检查OTA状态
     mqtt_subscribe_parse();   // 订阅所有需要的MQTT主题
@@ -1910,11 +1918,9 @@ int hlk_MQTTYield(SHARED_DATA_S *sharedData)
         }
         
         // 检查是否需要发送心跳包（每50秒发送一次）
-        time_ping = time(NULL);
-        if ((int)fabs(difftime(time_start, time_ping)) >= 50)
+        time_ping = zig_get_timestamp();
+        if ((int)zig_time_diff_abs(time_start, time_ping) >= 50)
         {
-            PRF("(int)abs(difftime(time_start, time_ping)):%d\n", 
-                (int)fabs(difftime(time_start, time_ping)));
             time_start = time_ping;  // 更新心跳时间基准
             hlk_mqtt_ping();         // 发送心跳包
         }
@@ -1956,12 +1962,15 @@ int hlk_mqtt_main()
             } 
             
             // 生成MD5加密的连接认证信息
+            printf("md5_encode\r\n");
             md5_encode();
             
             // 初始化所有MQTT主题
+            printf("mqtt_topic_type_init\r\n"); 
             mqtt_topic_type_init();
             
             // 设置消息处理函数
+            printf("hlk_MQTTYield\r\n");
             hlk_iot.func = hlk_MQTTYield;
             break;
             

@@ -297,6 +297,8 @@ int license_set(const license_config_t *config, const char *DN_, const char *PjK
 int license_get(const license_config_t *config, char *DN_, char *PjK_, 
                 char *PdK_, char *PdS_, char *DS_, size_t size_)
 {
+    syslog(LOG_INFO, "license_get: config=%p, DN_=%p, PjK_=%p, PdK_=%p, PdS_=%p, DS_=%p, size_=%zu", 
+           config, DN_, PjK_, PdK_, PdS_, DS_, size_);
     if (!config || !DN_ || !PjK_ || !PdK_ || !PdS_ || !DS_) {
         syslog(LOG_ERR, "Invalid input parameters");
         return -1;
