@@ -121,12 +121,25 @@ static int push_data_to_sse(const char *channel, const char *data);
 #include <signal.h>
 #include <errno.h>
 
+// 添加libcurl和cJSON的头文件
+#include <curl/curl.h>
+#include <cJSON.h>
+
+// 添加OpenSSL头文件用于SHA1
+#include <openssl/sha.h>
+
 // 定义子进程通信结构体
 typedef struct {
     int result_code;        // 下载结果代码
     int download_progress;  // 下载进度
     char error_msg[256];    // 错误信息
 } ota_download_result_t;
+
+// 定义内存结构体用于存储HTTP响应数据
+struct MemoryStruct {
+    char *memory;
+    size_t size;
+};
 
 // 定义下载超时时间（秒）
 #define OTA_DOWNLOAD_TIMEOUT 1800  // 30分钟
@@ -143,9 +156,49 @@ typedef struct {
 // 缓冲区大小定义
 #define BUFFER_SIZE 1024
 
+// MQTT和WebAPI地址相关宏定义
+#define MQTT_URL_COUNT 2
+#define MQTT_URL_LEN 32
+#define MQTT_URL "cloud.hlktech.com"
+
+// 请求地址相关宏定义
+#define REQUEST_ADDRESS "http://fl.hlktech.com/api/v1/Urls/GetHost"
+#define REQUEST_ADDRESS_TOKEN "93GFQBbLjAHrR85TdnrlQI2nKRFk5d7r"
+#define REQUEST_ACCESSID "H0002"
+
+// API路径宏定义
+#define POST_INIF_API "/api/iot/device/init"
+#define POST_HISTORY_API "/api/iot/device/history"
+#define POST_OTA_INFO "/api/iot/device/ota"
+
+#define PRODUCT_KEY_MAXLEN          (20 + 1)
+#define PRODUCT_ID_MAXLEN          (20 + 1)
+#define DEVICE_NAME_MAXLEN          (32 + 1)
+#define DEVICE_ID_MAXLEN            (64 + 1)
+#define DEVICE_SECRET_MAXLEN        (64 + 1)
+#define PRODUCT_SECRET_MAXLEN       (64 + 1)
+
+// 设备信息结构体定义
+typedef struct
+{
+    unsigned int magic;
+    char productKey[PRODUCT_KEY_MAXLEN + 1];
+    char productSecret[DEVICE_SECRET_MAXLEN + 1];
+    char deviceName[DEVICE_NAME_MAXLEN + 1];
+    char deviceSecret[PRODUCT_KEY_MAXLEN + 1];
+    char projectKey[PRODUCT_KEY_MAXLEN];
+} ALINKDEV_t;
+
 // 全局变量定义
 static int g_mqtt_flag = 0;           // MQTT连接状态标志位
 MQTT_USER_CERT_S mqtt_user_cert = {0}; // MQTT用户认证信息结构体
+
+// MQTT和WebAPI地址全局变量
+char mqttUrl[50];
+char webApiUrl[50];
+char postInfoUrl[200];
+char postHistoryUrl[200];
+char postOtaInfoUrl[200];
 
 // 海凌科IoT连接结构体初始化
 HLK_IOT_S hlk_iot = {
@@ -173,6 +226,54 @@ MQTT_PUB_SUB_PATTERN_S mqtt_topic_type_table[] = {
 
 // MQTT连接认证信息结构体
 MQTT_CONNECT_CRET_S mqtt_connect_cret = {0};
+
+
+/******************************************************************************
+ * 函数名    : replace_https_with_http
+ * 功能描述  : 将URL中的https替换为http
+ * 输入参数  : url - 要处理的URL字符串
+ * 输出参数  : 无
+ * 返回值    : 无
+ * 说明      : 用于将HTTPS URL转换为HTTP URL
+ ******************************************************************************/
+void replace_https_with_http(char *url)
+{
+    if (url == NULL) return;
+
+    const char *https_prefix = "https://";
+    const char *http_prefix = "http://";
+
+    if (strncmp(url, https_prefix, strlen(https_prefix)) == 0) {
+        // 将https://替换为http://
+        memmove(url + strlen(http_prefix), url + strlen(https_prefix),
+                strlen(url) - strlen(https_prefix) + 1);
+        memcpy(url, http_prefix, strlen(http_prefix));
+    }
+}
+
+/******************************************************************************
+ * 函数名    : get_device_credentials
+ * 功能描述  : 获取设备认证信息
+ * 输入参数  : dev - 指向设备信息结构体的指针
+ * 输出参数  : 无
+ * 返回值    : 0-成功 -1-失败
+ * 说明      : 从配置管理模块获取设备五元组信息
+ ******************************************************************************/
+int get_device_credentials(ALINKDEV_t *dev)
+{
+    if (dev == NULL) return -1;
+
+    // 从配置管理模块获取设备五元组信息
+    int ret = cfmGetLicense(dev->deviceName, dev->projectKey, dev->productKey,
+                           dev->productSecret, dev->deviceSecret, 64);
+
+    if(ret != 0){
+        printf("cfmGetLicense failed!\n");
+        return -1;
+    }
+
+    return 0;
+}
 
 /********* OTA升级相关全局变量 *********/
 uint32_t g_ota_msgid = 0;  // OTA升级消息ID
@@ -399,8 +500,11 @@ int hlk_mqtt_ping(void)
     cJSON_AddNumberToObject(root, "TotalSize", mqtt_app_heartbeat.disk_size);
     cJSON_AddNumberToObject(root, "AvailableFreeSpace", mqtt_app_heartbeat.free_disk_size);
     
-    // 添加CPU使用率
-    cJSON_AddNumberToObject(root, "CpuRate", mqtt_app_heartbeat.cpu_rate);
+    // 添加CPU使用率（保留2位小数，使用字符串格式避免精度问题）
+    char cpu_rate_str[16];
+    float cpu_rate_rounded = ((int)(mqtt_app_heartbeat.cpu_rate * 100 + 0.5)) / 100.0;
+    snprintf(cpu_rate_str, sizeof(cpu_rate_str), "%.2f", cpu_rate_rounded);
+    cJSON_AddStringToObject(root, "CpuRate", cpu_rate_str);
 
     // 添加温度信息
     cJSON_AddNumberToObject(root, "Temperature", mqtt_app_heartbeat.temperature);
@@ -961,6 +1065,7 @@ size_t write_callback(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     size_t expected_bytes;
     size_t wirtten = 0;
     PRF("write_callback size:%d, nmemb:%d\n", size, nmemb);
+    PRF("ptr:%s\n", ptr);
 
     // 检查输入参数的有效性
     if (!ptr || !stream || size == 0 || nmemb == 0) {
@@ -977,7 +1082,7 @@ size_t write_callback(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     } else {
         wirtten = fwrite((char *)ptr, size, nmemb, stream);
         expected_bytes = size * nmemb;
-    }    
+    }
 
     // 检查写入是否成功
     if (wirtten != expected_bytes) {
@@ -2045,3 +2150,374 @@ static int push_data_to_sse(const char *channel, const char *data)
     close(pipe_fd);
     return result;
 }
+
+/******************************************************************************
+ * 函数名    : hlk_get_signature
+ * 功能描述  : 生成HLK平台的API签名
+ * 输入参数  : timestamp - 时间戳字符串
+ *            Token     - 令牌字符串
+ *            Nonce     - 随机数字符串
+ * 输出参数  : signature - 生成的签名字符串
+ * 返回值    : 签名字符串指针
+ * 说明      : 根据小系统版本的签名算法，对参数值进行排序后直接拼接计算SHA1
+ ******************************************************************************/
+char *hlk_get_signature(char *timestamp, char *Token, char *Nonce, char *signature)
+{
+    // 打印传入参数
+    printf("Timestamp: %s\n", timestamp);
+    printf("Token: %s\n", Token);
+    printf("Nonce: %s\n", Nonce);
+
+    char *a[3];
+    a[0] = timestamp;
+    a[1] = Token;
+    a[2] = Nonce;
+    char *tmp = NULL;
+
+    // 排序参数值
+    (memcmp(a[0], a[1], strlen(a[0])) < 0) ? (a[0] = a[0]) : (tmp = a[0], a[0] = a[1], a[1] = tmp);
+    (memcmp(a[0], a[2], strlen(a[0])) < 0) ? (a[0] = a[0]) : (tmp = a[0], a[0] = a[2], a[2] = tmp);
+    (memcmp(a[1], a[2], strlen(a[1])) < 0) ? (a[1] = a[1]) : (tmp = a[1], a[1] = a[2], a[2] = tmp);
+
+    // 拼接字符串
+    char sha1_ori[256] = {0};
+    sprintf(sha1_ori, "%s%s%s", a[0], a[1], a[2]);
+    printf("strcat string:%s\n", sha1_ori);
+
+    // 计算SHA1
+    unsigned char sha1_result[SHA_DIGEST_LENGTH]; // SHA1结果是20字节
+    SHA1((unsigned char *)sha1_ori, strlen(sha1_ori), sha1_result);
+
+    // 将SHA1结果转换为十六进制字符串
+    for (int i = 0; i < SHA_DIGEST_LENGTH; i++) {
+        sprintf(signature + (i * 2), "%02x", sha1_result[i]);
+    }
+
+    printf("finish!!!!!  %s\r\n", signature);
+    return signature;
+}
+
+/******************************************************************************
+ * 函数名    : get_system_timestamp
+ * 功能描述  : 获取系统时间戳，替代HLK的SNTP时间同步
+ * 输入参数  : 无
+ * 输出参数  : 无
+ * 返回值    : 时间戳（秒）
+ * 说明      : 使用标准C库的time()函数获取当前时间戳
+ *            如果时间看起来不合理（太小），则返回错误值
+ ******************************************************************************/
+time_t get_system_timestamp(void)
+{
+    time_t current_time = zig_get_timestamp();
+
+    // 检查时间是否合理（大于2021-01-01 00:00:00 UTC的时间戳）
+    if (current_time < 1609459200) {
+        PRF("Warning: System time appears to be incorrect (timestamp: %lld)\n", current_time);
+        PRF("Please ensure system time is properly synchronized\n");
+        // 返回错误值，让调用者处理
+        return 0;
+    }
+
+    return current_time;
+}
+
+/******************************************************************************
+ * 函数名    : sync_system_time
+ * 功能描述  : 同步系统时间
+ * 输入参数  : 无
+ * 输出参数  : 无
+ * 返回值    : 0-成功 -1-失败
+ * 说明      : 尝试通过 NTP 或其他方式同步系统时间
+ ******************************************************************************/
+int sync_system_time(void)
+{
+    printf("Attempting to sync system time...\n");
+
+    // 方法1: 尝试使用 ntpdate 命令同步时间
+    int ret = system("ntpdate -u pool.ntp.org > /dev/null 2>&1");
+    if (ret == 0) {
+        printf("System time synchronized successfully using ntpdate\n");
+        return 0;
+    }
+
+    printf("Please ensure system time is manually synchronized\n");
+
+    return -1;
+}
+
+size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
+{
+    size_t realsize = size * nmemb;
+    struct MemoryStruct *mem = (struct MemoryStruct *)stream;
+
+    PRF("%s\n", ptr);
+
+    // 重新分配内存以容纳新数据
+    char *ptr_realloc = realloc(mem->memory, mem->size + realsize + 1);
+    if (ptr_realloc == NULL) {
+        PRF("quest_write_callback: realloc failed\n");
+        return 0;
+    }
+
+    mem->memory = ptr_realloc;
+    memcpy(&(mem->memory[mem->size]), ptr, realsize);
+    mem->size += realsize;
+    mem->memory[mem->size] = 0; // 确保字符串以null结尾
+    
+    return realsize;
+}
+
+/******************************************************************************
+ * 函数名    : query_request_address
+ * 功能描述  : 查询MQTT服务器和WebAPI服务器地址
+ * 输入参数  : 无
+ * 输出参数  : 无
+ * 返回值    : 0-失败 1-成功
+ * 说明      : 使用libcurl发送HTTP POST请求到地址查询接口，解析返回的JSON数据
+ ******************************************************************************/
+ int query_request_address(void)
+ {
+     PRF("query_request_address\n");
+     int ret = 0;
+     CURL *curl = NULL;
+     CURLcode res;
+     struct MemoryStruct response_data = {0};
+ 
+     // 初始化响应数据结构体
+     response_data.memory = malloc(1024);
+     if (response_data.memory == NULL) {
+        PRF("Failed to allocate memory for response\n");
+         return -1;
+     }
+     response_data.size = 0;
+ 
+     // 获取设备信息
+     ALINKDEV_t *g_hlk_devinfo = calloc(1, sizeof(ALINKDEV_t));
+     if (!g_hlk_devinfo) {
+        PRF("Failed to allocate memory for device info\n");
+         free(response_data.memory);
+         return -1;
+     }
+ 
+     if (get_device_credentials(g_hlk_devinfo) != 0) {
+        PRF("Failed to get device credentials\n");
+         free(g_hlk_devinfo);
+         free(response_data.memory);
+         return -1;
+     }
+     PRF("DN:%s\n", g_hlk_devinfo->deviceName);
+     PRF("PJ:%s\n", g_hlk_devinfo->projectKey);
+     PRF("PK:%s\n", g_hlk_devinfo->productKey);
+     PRF("PS:%s\n", g_hlk_devinfo->productSecret);
+     PRF("DS:%s\n", g_hlk_devinfo->deviceSecret);
+ 
+     // 获取系统时间戳，如果无效则尝试同步
+     time_t time_now = get_system_timestamp();
+     if (time_now == 0) {
+        PRF("System time appears to be invalid, attempting to sync...\n");
+ 
+         // 尝试同步系统时间
+         if (sync_system_time() != 0) {
+            PRF("Failed to sync system time\n");
+             free(g_hlk_devinfo);
+             free(response_data.memory);
+             return -1;
+         }
+ 
+         // 重新获取时间戳
+         time_now = get_system_timestamp();
+         if (time_now == 0) {
+            PRF("System time is still invalid after sync attempt\n");
+             free(g_hlk_devinfo);
+             free(response_data.memory);
+             return -1;
+         }
+ 
+         PRF("System time synchronized successfully\n");
+     }
+ 
+     // 生成时间戳字符串
+     char time_str[15] = {0};
+     snprintf(time_str, sizeof(time_str), "%lld000", time_now);
+ 
+     // 构建请求数据
+     char data[100] = {0};
+     char nonce[7] = {0};
+     snprintf(nonce, 6, "%.5ld5", rand() % 9999);  // 生成随机nonce
+     snprintf(data, sizeof(data), "Sn=%s&RType=%d&PType=%d", g_hlk_devinfo->deviceName, 3, 2);
+ 
+     // 生成签名
+     char signature[70] = {0};
+     char *token = REQUEST_ADDRESS_TOKEN;
+     hlk_get_signature(time_str, token, nonce, signature);
+  
+     // 初始化libcurl
+     curl = curl_easy_init();
+     if (!curl) {
+        PRF("Failed to initialize curl\n");
+         free(g_hlk_devinfo);
+         free(response_data.memory);
+         return -1;
+     }
+ 
+     // 设置curl选项
+     curl_easy_setopt(curl, CURLOPT_URL, REQUEST_ADDRESS);
+     curl_easy_setopt(curl, CURLOPT_POST, 1L);
+     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, data);
+     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, strlen(data));
+ 
+     // 设置请求头
+     struct curl_slist *headers = NULL;
+     headers = curl_slist_append(headers, "Accept: application/json");
+     headers = curl_slist_append(headers, "Content-Type: application/x-www-form-urlencoded");
+     char accessid_header[64];
+     snprintf(accessid_header, sizeof(accessid_header), "AccessId: %s", REQUEST_ACCESSID);
+     headers = curl_slist_append(headers, accessid_header);
+     char nonce_header[32];
+     snprintf(nonce_header, sizeof(nonce_header), "Nonce: %s", nonce);
+     headers = curl_slist_append(headers, nonce_header);
+     char signature_header[128];
+     snprintf(signature_header, sizeof(signature_header), "Signature: %s", signature);
+     headers = curl_slist_append(headers, signature_header);
+    char timestamp_header[64];
+    snprintf(timestamp_header, sizeof(timestamp_header), "Timestamp: %s", time_str);
+    headers = curl_slist_append(headers, timestamp_header);
+    char content_length_header[32];
+    snprintf(content_length_header, sizeof(content_length_header), "Content-Length: %d", (int)strlen(data));
+    headers = curl_slist_append(headers, content_length_header);
+ 
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+ 
+    // 设置响应数据回调
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, quest_write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_data);
+ 
+    // 设置超时时间
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+ 
+    // 执行请求
+    res = curl_easy_perform(curl);
+    if (res != CURLE_OK) {
+        PRF("curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
+        curl_easy_cleanup(curl);
+        curl_slist_free_all(headers);
+        free(g_hlk_devinfo);
+        free(response_data.memory);
+        return -1;
+    }
+ 
+    PRF("HTTP response: %s\n", response_data.memory);
+ 
+     // 解析JSON响应
+    cJSON *json = cJSON_Parse(response_data.memory);
+    if (json == NULL) {
+        PRF("Error parsing JSON response: %s\n", cJSON_GetErrorPtr());
+         curl_easy_cleanup(curl);
+         curl_slist_free_all(headers);
+         free(g_hlk_devinfo);
+         free(response_data.memory);
+        return -1;
+    }
+ 
+     // 检查响应状态码
+     cJSON *code_status = cJSON_GetObjectItemCaseSensitive(json, "Code");
+     if (!cJSON_IsNumber(code_status) || (code_status->valueint != 1)) {
+        PRF("API request failed. Code: %d\n", code_status->valueint);
+         cJSON_Delete(json);
+         curl_easy_cleanup(curl);
+         curl_slist_free_all(headers);
+         free(g_hlk_devinfo);
+         free(response_data.memory);
+         return -1;
+     }
+ 
+     // 获取Data字段
+     cJSON *jsonData = cJSON_GetObjectItemCaseSensitive(json, "Data");
+     if (jsonData != NULL && cJSON_IsArray(jsonData)) {
+         int arraySize = cJSON_GetArraySize(jsonData);
+         for (int i = 0; i < arraySize; i++) {
+             cJSON *item = cJSON_GetArrayItem(jsonData, i);
+             if (cJSON_IsObject(item)) {
+                 cJSON *uType = cJSON_GetObjectItemCaseSensitive(item, "UType");
+                 cJSON *url = cJSON_GetObjectItemCaseSensitive(item, "Url");
+ 
+                 if (cJSON_IsNumber(uType) && cJSON_IsString(url)) {
+                     switch (uType->valueint) {
+                     case 2: // MQTT服务器
+                         strncpy(mqttUrl, url->valuestring, sizeof(mqttUrl) - 1);
+                         mqttUrl[sizeof(mqttUrl) - 1] = '\0';
+                         break;
+                     case 3: // Web API服务器
+                         strncpy(webApiUrl, url->valuestring, sizeof(webApiUrl) - 1);
+                         webApiUrl[sizeof(webApiUrl) - 1] = '\0';
+                         replace_https_with_http(webApiUrl);
+                         break;
+                     }
+                 }
+             }
+         }
+         ret = 1;
+ 
+         PRF("MQTT Address: %s\n", mqttUrl);
+         PRF("Web API Address: %s\n", webApiUrl);
+ 
+         // 构建完整的API URL
+         snprintf(postInfoUrl, sizeof(postInfoUrl), "%s%s", webApiUrl, POST_INIF_API);
+         snprintf(postHistoryUrl, sizeof(postHistoryUrl), "%s%s", webApiUrl, POST_HISTORY_API);
+         snprintf(postOtaInfoUrl, sizeof(postOtaInfoUrl), "%s%s", webApiUrl, POST_OTA_INFO);
+ 
+         PRF("postInfoUrl: %s\n", postInfoUrl);
+         PRF("postHistoryUrl: %s\n", postHistoryUrl);
+         PRF("postOtaInfoUrl: %s\n", postOtaInfoUrl);
+     } else {
+        PRF("Data field is missing or not an array\n");
+     }
+ 
+     // 清理资源
+     cJSON_Delete(json);
+     curl_easy_cleanup(curl);
+     curl_slist_free_all(headers);
+     free(g_hlk_devinfo);
+     free(response_data.memory);
+ 
+     PRF("query_request_address completed with ret = %d\n", ret);
+     return ret;
+ }
+
+/******************************************************************************
+ * 函数名    : switch_mqtt_url
+ * 功能描述  : 切换MQTT服务器地址
+ * 输入参数  : url - 指向URL字符串指针的指针
+ * 输出参数  : 无
+ * 返回值    : 无
+ * 说明      : 查询MQTT服务器地址并更新全局变量
+ ******************************************************************************/
+void switch_mqtt_url(char **url)
+{
+    PRF("switch_mqtt_url\n");
+    static char url_store[MQTT_URL_COUNT][MQTT_URL_LEN] = {0};
+    int ret = -1;
+
+    // 查询MQTT和WEB地址
+    while(ret != 1)
+    {
+        ret = query_request_address();
+        PRF("query_request_address ret = %d\n", ret);
+        if (ret == 1)
+        {
+            // 查询成功，设置MQTT连接地址
+            strncpy(url_store[0], mqttUrl, MQTT_URL_LEN-1);
+            url_store[0][MQTT_URL_LEN-1] = '\0';
+
+            // 添加备用地址
+            strncpy(url_store[1], MQTT_URL, MQTT_URL_LEN-1);
+            url_store[1][MQTT_URL_LEN-1] = '\0';
+        } else {
+            zig_msleep(1000);
+            PRF("query_request_address failed, retry...\n");
+        }
+    }
+    *url = url_store[0];
+}
+
+

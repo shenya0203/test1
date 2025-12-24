@@ -357,7 +357,7 @@ fn addPlatformDependencies(b: *std.Build, exe: *std.Build.Step.Compile, platform
     const include_base = std.fmt.allocPrint(b.allocator, "{s}/include", .{platform_path}) catch unreachable;
 
     // 检查并添加各个库的包含路径 (跳过cjson，因为主目录已有)
-    const include_dirs = [_][]const u8{ "curl", "libubox", "modbus" };
+    const include_dirs = [_][]const u8{ "curl", "libubox", "modbus", "openssl" };
     for (include_dirs) |include_dir| {
         const full_include_path = std.fmt.allocPrint(b.allocator, "{s}/{s}", .{ include_base, include_dir }) catch unreachable;
         if (std.fs.cwd().access(full_include_path, .{})) |_| {
@@ -399,6 +399,8 @@ fn addPlatformDependencies(b: *std.Build, exe: *std.Build.Step.Compile, platform
         "ubox",
         "ubus",
         "uci",
+        "ssl",
+        "crypto",
     };
 
     // 链接系统库

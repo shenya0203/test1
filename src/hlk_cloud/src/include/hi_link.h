@@ -47,6 +47,8 @@ extern "C"
 #define DBG_PRINTF(fmt, args...)
 #endif
 
+#define MQTT_RECONNECT_INTERVAL 10000 /*10000ms*/
+
 #define HI_U2C_NOTIFIER "u2c_notifier" /**< 用户消息通知 */
 
 #define U2C_INTERVAL 5000 /*5000ms*/
@@ -205,6 +207,8 @@ int hi_link_get_channel_bool(const char *channel, bool *bool_value);
  */
 void hi_link_free_channel_value(hi_link_value_t *value);
 
+
+void switch_mqtt_url(char **url);
 
     /*****************************************************************************
      *                                FUNCTION                                    *

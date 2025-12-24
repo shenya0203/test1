@@ -452,7 +452,7 @@ int mqtt_main(struct Options options)
 		/* 连接失败，断开网络连接并重试 */
 		NetworkDisconnect(&n);
 		PRF("NetworkConnect rc : %d\n",rc);
-		app_msleep(10000);  /* 等待10秒后重试 */
+		app_msleep(MQTT_RECONNECT_INTERVAL);  /* 等待10秒后重试 */
 		goto conn;
 	}
 	
@@ -540,9 +540,7 @@ static void *hlk_user_main(void *arg)
     pthread_detach(pthread_self());
     
 	/* 等待系统初始化完成 */
-	printf("hlk_user_main\r\n");
 	//app_msleep(U2C_INTERVAL);
-	printf("hlk_user_main 2\r\n");
 	
     int rc = 0;
 	/* 测试函数指针数组，索引0为空，索引1为mqtt_main函数 */
@@ -556,6 +554,8 @@ static void *hlk_user_main(void *arg)
 	}else{
 		hlk_iot.connnect_type = MQTT_CONNECT_OTHER;    /* 其他连接类型 */
 	}
+
+	switch_mqtt_url(&options.host);
 
 	/* 初始化MQTT主模块 */
 	if(hlk_mqtt_main() != 0){

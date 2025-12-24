@@ -425,9 +425,57 @@ void get_disk_info(unsigned long *disk_size,unsigned long *free_disk_size)
  * @todo 实现CPU使用率计算功能
  ******************************************************************************/
 void get_cpu_info(float *cpu_rate) {
-    // 当前为空实现，将CPU使用率设置为0.0
-    *cpu_rate = 0.0;
-    return;
+    static unsigned long long prev_total = 0;
+    static unsigned long long prev_idle = 0;
+    unsigned long long total = 0;
+    unsigned long long idle = 0;
+    unsigned long long user, nice, system, idle_time, iowait, irq, softirq, steal;
+
+    FILE *stat_file = fopen("/proc/stat", "r");
+    if (stat_file == NULL) {
+        printf("Failed to open /proc/stat file.\n");
+        *cpu_rate = 0.0;
+        return;
+    }
+
+    // 读取CPU统计信息
+    // 格式: cpu user nice system idle iowait irq softirq steal
+    if (fscanf(stat_file, "cpu %llu %llu %llu %llu %llu %llu %llu %llu",
+               &user, &nice, &system, &idle_time, &iowait, &irq, &softirq, &steal) != 8) {
+        printf("Failed to read CPU stats from /proc/stat.\n");
+        fclose(stat_file);
+        *cpu_rate = 0.0;
+        return;
+    }
+
+    fclose(stat_file);
+
+    // 计算总时间和空闲时间
+    total = user + nice + system + idle_time + iowait + irq + softirq + steal;
+    idle = idle_time + iowait;  // 空闲时间包括idle和iowait
+
+    // 计算CPU使用率
+    if (prev_total == 0 || prev_idle == 0) {
+        // 第一次调用，无法计算使用率
+        *cpu_rate = 0.0;
+    } else {
+        unsigned long long total_diff = total - prev_total;
+        unsigned long long idle_diff = idle - prev_idle;
+
+        if (total_diff > 0) {
+            *cpu_rate = 100.0 * (total_diff - idle_diff) / (float)total_diff;
+            // 保留2位小数精度，避免过长的浮点数
+            *cpu_rate = ((int)(*cpu_rate * 100 + 0.5)) / 100.0;
+        } else {
+            *cpu_rate = 0.0;
+        }
+    }
+
+    // 保存当前值用于下次计算
+    prev_total = total;
+    prev_idle = idle;
+
+    printf("CPU usage: %.2f%%\n", *cpu_rate);
 }
 
 /******************************************************************************
@@ -476,30 +524,31 @@ void get_local_ip(char *local_ip)
  ******************************************************************************/
 void get_uptime_info(unsigned int *uptime)
 {
-    // 当前使用硬编码值
-    *uptime = 1745287759;  // 注意：这里有错误，应该是 *uptime = 1745287759;
-    
-    // 以下是读取/proc/uptime的实现代码（已注释）
-    // FILE *uptime_file;
-    // char *uptime_str;
-    // float fUptime;
+    FILE *uptime_file;
+    float fUptime;
+    float idle_time;  // /proc/uptime 格式: uptime idle-time
 
-    // uptime_file = fopen("/proc/uptime", "r");
-    // if (uptime_file == NULL) {
-    //     printf("Failed to open /proc/uptime file.\n");
-    //     return;
-    // }
+    uptime_file = fopen("/proc/uptime", "r");
+    if (uptime_file == NULL) {
+        printf("Failed to open /proc/uptime file.\n");
+        *uptime = 0;  // 返回0表示获取失败
+        return;
+    }
 
-    // fscanf(uptime_file,"%s",uptime_str);  // 这里有问题：uptime_str未分配内存
+    // 读取两个浮点数：系统运行时间和空闲时间
+    if (fscanf(uptime_file, "%f %f", &fUptime, &idle_time) != 2) {
+        printf("Failed to read uptime from /proc/uptime file.\n");
+        fclose(uptime_file);
+        *uptime = 0;  // 返回0表示获取失败
+        return;
+    }
 
-    // fUptime = atof(uptime_str);
-    // *uptime = (int)fUptime;
+    // 转换并返回系统运行时间（秒）
+    *uptime = (unsigned int)fUptime;
 
-    // printf("Device uptime: %d seconds\n", *uptime);
+    printf("Device uptime: %u seconds\n", *uptime);
 
-    // fclose(uptime_file);
-
-    return;
+    fclose(uptime_file);
 }
 
 /******************************************************************************
