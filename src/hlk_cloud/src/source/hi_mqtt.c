@@ -733,12 +733,16 @@ static void hlk_mqtt_handle_app(MessageData *pdata)
         if (pushDataStr) {
             push_data_to_sse(name, pushDataStr);
             free(pushDataStr);
-        }        
+        }
+    } else if (strcmp(name, "DataPointsDown") == 0 && cJSON_IsString(cJSON_GetObjectItem(inputData, "Value"))) {
+        //采集数据下发数据属性通道
+        //数据格式device=devname&point1=xx&point2=xx&point3=xx&device=devname2&point1=xx&point2=xx&point3=xx
+        char *value = cJSON_GetObjectItem(inputData, "Value")->valuestring;
+        //modbus_collector(value);  //传给modbus采集器处理
     } else {
 
         //云端可以自定义通道名称，此处可以处理自定义通道名称的逻辑
         //通道数据类型不定 怎么转发到 透传中
-        
 
         PRF("value error\n");
         
@@ -2292,12 +2296,9 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
      response_data.size = 0;
  
      // 获取设备信息
-     ALINKDEV_t *g_hlk_devinfo = calloc(1, sizeof(ALINKDEV_t));
-     if (!g_hlk_devinfo) {
-        PRF("Failed to allocate memory for device info\n");
-         free(response_data.memory);
-         return -1;
-     }
+     ALINKDEV_t hlk_devinfo = {0};
+     memset(&hlk_devinfo, 0, sizeof(ALINKDEV_t));
+     ALINKDEV_t *g_hlk_devinfo = &hlk_devinfo;
  
      if (get_device_credentials(g_hlk_devinfo) != 0) {
         PRF("Failed to get device credentials\n");
@@ -2305,6 +2306,7 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
          free(response_data.memory);
          return -1;
      }
+
      PRF("DN:%s\n", g_hlk_devinfo->deviceName);
      PRF("PJ:%s\n", g_hlk_devinfo->projectKey);
      PRF("PK:%s\n", g_hlk_devinfo->productKey);
@@ -2319,7 +2321,6 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
          // 尝试同步系统时间
          if (sync_system_time() != 0) {
             PRF("Failed to sync system time\n");
-             free(g_hlk_devinfo);
              free(response_data.memory);
              return -1;
          }
@@ -2328,7 +2329,6 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
          time_now = get_system_timestamp();
          if (time_now == 0) {
             PRF("System time is still invalid after sync attempt\n");
-             free(g_hlk_devinfo);
              free(response_data.memory);
              return -1;
          }
@@ -2351,11 +2351,19 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
      char *token = REQUEST_ADDRESS_TOKEN;
      hlk_get_signature(time_str, token, nonce, signature);
   
+
+    /* 初始化libcurl全局环境 - 防止在无网络环境下出现段错误 */
+    if (curl_global_init(CURL_GLOBAL_DEFAULT) != 0) {
+        PRF("Failed to initialize libcurl global environment\n");
+        free(response_data.memory);
+        return -1;
+    }
+
+
      // 初始化libcurl
      curl = curl_easy_init();
      if (!curl) {
         PRF("Failed to initialize curl\n");
-         free(g_hlk_devinfo);
          free(response_data.memory);
          return -1;
      }
@@ -2391,17 +2399,30 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
     // 设置响应数据回调
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, quest_write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_data);
- 
-    // 设置超时时间
+
+    // 设置超时时间 - MT7688设备需要更严格的超时控制
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
- 
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);  // 连接超时3秒
+
+    // 添加错误缓冲区以获取详细错误信息
+    char errbuf[CURL_ERROR_SIZE] = {0};
+    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf);
+
+    // 设置DNS缓存超时，避免DNS解析hang住
+    curl_easy_setopt(curl, CURLOPT_DNS_CACHE_TIMEOUT, 10L);
+
+    // 禁用信号处理，避免在嵌入式环境下出现问题
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+
     // 执行请求
     res = curl_easy_perform(curl);
     if (res != CURLE_OK) {
         PRF("curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
+        if (strlen(errbuf) > 0) {
+            PRF("Detailed error: %s\n", errbuf);
+        }
         curl_easy_cleanup(curl);
         curl_slist_free_all(headers);
-        free(g_hlk_devinfo);
         free(response_data.memory);
         return -1;
     }
@@ -2414,7 +2435,6 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
         PRF("Error parsing JSON response: %s\n", cJSON_GetErrorPtr());
          curl_easy_cleanup(curl);
          curl_slist_free_all(headers);
-         free(g_hlk_devinfo);
          free(response_data.memory);
         return -1;
     }
@@ -2426,7 +2446,6 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
          cJSON_Delete(json);
          curl_easy_cleanup(curl);
          curl_slist_free_all(headers);
-         free(g_hlk_devinfo);
          free(response_data.memory);
          return -1;
      }
@@ -2477,7 +2496,6 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
      cJSON_Delete(json);
      curl_easy_cleanup(curl);
      curl_slist_free_all(headers);
-     free(g_hlk_devinfo);
      free(response_data.memory);
  
      PRF("query_request_address completed with ret = %d\n", ret);
@@ -2513,9 +2531,9 @@ void switch_mqtt_url(char **url)
             strncpy(url_store[1], MQTT_URL, MQTT_URL_LEN-1);
             url_store[1][MQTT_URL_LEN-1] = '\0';
         } else {
-            zig_msleep(1000);
-            PRF("query_request_address failed, retry...\n");
+            app_msleep(1000);
         }
+        app_msleep(1000);
     }
     *url = url_store[0];
 }
