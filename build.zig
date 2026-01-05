@@ -258,6 +258,7 @@ fn addCSourceFiles(b: *std.Build, exe: *std.Build.Step.Compile, product_id: []co
     const include_paths = [_][]const u8{
         "src/hlk_cloud/src/include", // 主头文件目录
         "src/hlk_cloud/src/source", // 源文件目录中的头文件
+        "src/hlk_cloud/src/modbus_collector", // Modbus收集器头文件目录
         "src/hlk_cloud/src", // 支持相对包含路径如 MQTTPacket/MQTTPacket.h
         std.fmt.allocPrint(allocator, "src/hlk_cloud/src/platform/{s}", .{product_id}) catch unreachable,
     };

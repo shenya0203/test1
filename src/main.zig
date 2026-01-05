@@ -39,6 +39,22 @@ pub const ZigFdSet = extern struct {
 extern "c" fn gettimeofday(tv: ?*std.c.timeval, tz: ?*std.c.timezone) c_int;
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn tzset() void;
+// 定义tm结构体，与C兼容
+pub const tm = extern struct {
+    tm_sec: c_int, // 秒 (0-59)
+    tm_min: c_int, // 分 (0-59)
+    tm_hour: c_int, // 时 (0-23)
+    tm_mday: c_int, // 日 (1-31)
+    tm_mon: c_int, // 月 (0-11)
+    tm_year: c_int, // 年 (从1900年开始)
+    tm_wday: c_int, // 星期几 (0-6, 0=星期日)
+    tm_yday: c_int, // 年中的第几天 (0-365)
+    tm_isdst: c_int, // 夏令时标志
+    tm_gmtoff: c_long, // 时区偏移（秒）
+    tm_zone: [*:0]const u8, // 时区名称
+};
+
+extern "c" fn localtime(timer: *const std.c.time_t) ?*tm;
 
 // gettimeofday的Zig实现
 export fn zig_gettimeofday(tv: *ZigTimeval, tz: ?*anyopaque) c_int {
@@ -136,6 +152,16 @@ export fn zig_set_timesync(timestamp: i64) c_int {
     // 使用system()调用执行date命令
     const result = system(@as([*:0]const u8, @ptrCast(cmd.ptr)));
     return result;
+}
+
+// 全局静态tm结构体，用于存储localtime结果
+// 注意：这不是线程安全的，如果需要线程安全，应该使用线程局部存储
+var global_tm: tm = undefined;
+
+// 获取本地时间结构体 - Zig实现
+export fn zig_get_localtime(timer: *const std.c.time_t) ?*tm {
+    // 直接调用C库的localtime函数
+    return localtime(timer);
 }
 
 // -----------------------------------------------------------
@@ -265,20 +291,20 @@ pub fn main() !void {
 
     // 调用 C 函数启动MQTT主程序
 
-    //const result = hi_link_init();
+    const result = hi_link_init();
 
     // // 检查初始化结果
-    // if (result != 0) {
-    //     std.process.exit(@intCast(result));
-    // }
+    if (result != 0) {
+        std.process.exit(@intCast(result));
+    }
 
     //数据采集初始化
     // 初始化成功后，主线程需要卡住等待，避免进程退出
     // 这样后台线程或服务可以继续运行
     while (true) {
         std.debug.print("main loop\r\n", .{});
-        modbus_collector.collector_sync_data(collector_ctx);
-
+        //modbus_collector.collector_sync_data(collector_ctx);
+        _ = modbus_collector.collector_report_data(collector_ctx);
         // 每秒检查一次，保持进程运行
         _ = sleep(1);
     }

@@ -191,3 +191,7 @@ zig build -Dtarget=x86_64-windows     # Windows 64-bit
 4. **Develop**: Modify `src/main.zig` and rebuild as needed
 
 Happy coding with Zig on OpenWrt! 🚀
+
+
+# 使用repomix 打包工程给AI
+npx repomix@latest --ignore ".zig-cache/,.zig-cache-new/,.vscode/,.zig-out/,src/hlk_cloud/MQTTPacket/,src/hlk_cloud/openwrt,src/hlk_cloud/platform/,src/include/,src/linux/,src/hlk_cloud/src/source/yyjson.c,src/hlk_cloud/src/include/yyjson.h,src/platform/mt7688/include/openssl/obj_mac.h,src/platform/mt7688/include/curl/curl.h,src/platform/mt7981/include/curl/curl.h,src/platform/mt7688/include/openssl/ssl.h,src/platform/mt7621/include/curl/curl.h,src/platform/mt7688/include/openssl/tls1.h,src/platform/mt7688/include/openssl/evp.h,src/hlk_cloud/src/source/cJSON.c,src/platform/mt7688/include/openssl/ec.h,src/platform/mt7688/include/openssl/x509.h,src/platform/mt7688/include/openssl/sslerr.h,src/platform/mt7688/include/openssl/asn1.h,src/platform/mt7688/include/openssl/,src/platform/mt7688/include/,src/platform/mt7981/,src/platform/mt7621/,src/hlk_cloud/src/source/hi_link_ipc.c,src/hlk_cloud/src/source/md5.c,src/hlk_cloud/src/client/MQTTClient.c,"

@@ -10,6 +10,7 @@
 #include "cJSON.h"
 #include "app_api.h"
 #include "data_collector.h"
+#include "hi_mqtt.h"
 
 // 共享内存定义保持不变...
 #define MODBUS_SHM_NAME "/modbus_shm"
@@ -141,6 +142,84 @@ static void parse_cloud_content(collector_ctx_t *ctx, cJSON *root, const char *f
            filename, added, skipped_devices, skipped_points);
 }
 
+// 解析Cloud上报配置参数
+static void parse_cloud_report_config(collector_ctx_t *ctx, cJSON *root, const char *filename)
+{
+    printf("[Collector] 开始解析Cloud上报配置参数: 文件 %s\n", filename);
+
+    cloud_report_config_t *config = &ctx->report_config;
+
+    // 解析change_report_type字段
+    cJSON *change_report_type = cJSON_GetObjectItem(root, "change_report_type");
+    if (change_report_type && cJSON_IsNumber(change_report_type)) {
+        config->change_report_type = change_report_type->valueint;
+        printf("[Collector] change_report_type: %d\n", config->change_report_type);
+    }
+
+    // 解析name字段
+    cJSON *name = cJSON_GetObjectItem(root, "name");
+    if (name && cJSON_IsString(name)) {
+        strncpy(config->name, name->valuestring, sizeof(config->name) - 1);
+        printf("[Collector] name: %s\n", config->name);
+    }
+
+    // 解析data_report_type字段
+    cJSON *data_report_type = cJSON_GetObjectItem(root, "data_report_type");
+    if (data_report_type && cJSON_IsNumber(data_report_type)) {
+        config->data_report_type = data_report_type->valueint;
+        printf("[Collector] data_report_type: %d\n", config->data_report_type);
+    }
+
+    // 解析err_enable字段
+    cJSON *err_enable = cJSON_GetObjectItem(root, "err_enable");
+    if (err_enable && cJSON_IsNumber(err_enable)) {
+        config->err_enable = err_enable->valueint;
+        printf("[Collector] err_enable: %d\n", config->err_enable);
+    }
+
+    // 解析err_info字段
+    cJSON *err_info = cJSON_GetObjectItem(root, "err_info");
+    if (err_info && cJSON_IsString(err_info)) {
+        strncpy(config->err_info, err_info->valuestring, sizeof(config->err_info) - 1);
+        printf("[Collector] err_info: %s\n", config->err_info);
+    }
+
+    // 解析cond字段 (上报条件)
+    cJSON *cond = cJSON_GetObjectItem(root, "cond");
+    if (cond && cJSON_IsObject(cond)) {
+        // 解析period字段
+        cJSON *period = cJSON_GetObjectItem(cond, "period");
+        if (period && cJSON_IsNumber(period)) {
+            config->cond.period = period->valueint;
+            printf("[Collector] cond.period: %d\n", config->cond.period);
+        }
+
+        // 解析timed字段
+        cJSON *timed = cJSON_GetObjectItem(cond, "timed");
+        if (timed && cJSON_IsObject(timed)) {
+            cJSON *type = cJSON_GetObjectItem(timed, "type");
+            if (type && cJSON_IsNumber(type)) {
+                config->cond.timed.type = type->valueint;
+                printf("[Collector] cond.timed.type: %d\n", config->cond.timed.type);
+            }
+
+            cJSON *hh = cJSON_GetObjectItem(timed, "hh");
+            if (hh && cJSON_IsNumber(hh)) {
+                config->cond.timed.hh = hh->valueint;
+                printf("[Collector] cond.timed.hh: %d\n", config->cond.timed.hh);
+            }
+
+            cJSON *mm = cJSON_GetObjectItem(timed, "mm");
+            if (mm && cJSON_IsNumber(mm)) {
+                config->cond.timed.mm = mm->valueint;
+                printf("[Collector] cond.timed.mm: %d\n", config->cond.timed.mm);
+            }
+        }
+    }
+
+    printf("[Collector] Cloud上报配置参数解析完成: 文件 %s\n", filename);
+}
+
 // 处理单个配置文件
 static void process_config_file(collector_ctx_t *ctx, const char *full_path, const char *filename)
 {
@@ -217,10 +296,12 @@ static void process_config_file(collector_ctx_t *ctx, const char *full_path, con
     if (strcmp(link->valuestring, "Cloud") == 0) {
         printf("[Collector] 检测到Cloud模式，开始解析点位配置 %s\n", filename);
         parse_cloud_content(ctx, json, filename);
+        // 解析Cloud上报配置参数
+        parse_cloud_report_config(ctx, json, filename);
     } else {
         printf("[Collector] 跳过非Cloud模式配置文件 %s (模式: %s)\n", filename, link->valuestring);
     }
-    //解析其他参数
+    
 
     cJSON_Delete(json);
 }
@@ -382,7 +463,7 @@ void collector_sync_data(collector_ctx_t *ctx)
     // 心跳没变：检查是否超时 (例如超过 5 秒没更新)
     if (zig_time_diff_abs(now, shm->last_update_time) > 5) {
         printf("[Collector] 警告：共享内存数据僵死 (心跳未更新 > 5s)，采集进程可能已挂起。\n");
-        printf("[Collector] now: %lld, shm->last_update_time: %lld\n", now, shm->last_update_time);
+        printf("[Collector] now: %lld, shm->last_update_time: %d\n", now, shm->last_update_time);
     }
 
     // ==========================================
@@ -396,6 +477,206 @@ void collector_sync_data(collector_ctx_t *ctx)
             printf("[Collector] %s.%s = %f\n", ctx->targets[i].device_name, ctx->targets[i].point_name, ctx->targets[i].current_value);
         }
     }
+}
+
+// 检查是否需要上报（根据周期和定时配置）
+static int should_report_data(collector_ctx_t *ctx)
+{
+    if (!ctx) return 0;
+
+    cloud_report_config_t *config = &ctx->report_config;
+    time_t now;
+    struct tm *tm_now = NULL;
+    printf("[Collector] should_report_data\n");
+
+    now = zig_get_timestamp();
+    tm_now = zig_get_localtime(&now);
+
+    printf("[Collector] tm_now->tm_hour: %d, tm_now->tm_min: %d, tm_now->tm_sec: %d\n", tm_now->tm_hour, tm_now->tm_min, tm_now->tm_sec);
+
+    // 检查周期上报
+    if (config->cond.period > 0) {
+        // 简单的周期检查：每period秒上报一次
+        // 这里可以根据实际需要实现更复杂的逻辑，比如记录上次上报时间
+        static time_t last_period_report = 0;
+        if (now - last_period_report >= config->cond.period) {
+            last_period_report = now;
+            printf("[Collector] last_period_report: %lld\n", last_period_report);
+            return 1;
+        }
+    }
+    printf("[Collector] config->cond.period: %d\n", config->cond.period);
+
+    // 检查定时上报
+    if (config->cond.timed.type != 0) {
+        switch (config->cond.timed.type) {
+            case 1: // 整时
+                if (tm_now->tm_min == 0 && tm_now->tm_sec == 0) {
+                    return 1;
+                }
+                break;
+            case 2: // 整刻（每15分钟）
+                if (tm_now->tm_min % 15 == 0 && tm_now->tm_sec == 0) {
+                    return 1;
+                }
+                break;
+            case 3: // 整分
+                if (tm_now->tm_sec == 0) {
+                    return 1;
+                }
+                break;
+            case 4: // 固定时间
+                if (tm_now->tm_hour == config->cond.timed.hh &&
+                    tm_now->tm_min == config->cond.timed.mm) {
+                    return 1;
+                }
+                break;
+            default:
+                break;
+        }
+    }
+
+    return 0;
+}
+
+// 准备上报数据（URL编码格式）
+static char* prepare_report_data_urlencoded(collector_ctx_t *ctx)
+{
+    printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 开始准备上报数据\n");
+
+    if (!ctx || !ctx->targets || ctx->target_count <= 0) {
+        printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 参数无效 - ctx=%p, targets=%p, count=%d\n",
+               ctx, ctx ? ctx->targets : NULL, ctx ? ctx->target_count : 0);
+        return NULL;
+    }
+
+    printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 配置名称=%s, 目标点位数量=%d\n",
+           ctx->report_config.name, ctx->target_count);
+
+    // 估算字符串长度：时间戳(25) + 每个点位的空间(设备名50 + 点位名50 + 数值25 + 分隔符5) * 点位数
+    // 额外预留设备DN标签的空间
+    size_t estimated_len = 25; // time=xxxxxxxxx&
+    for (int i = 0; i < ctx->target_count; i++) {
+        estimated_len += 50 + 50 + 25 + 5; // DN=设备名&点位名=数值&
+    }
+
+    printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 预估字符串长度=%zu\n", estimated_len);
+
+    // 分配内存
+    char *result = (char*)malloc(estimated_len);
+    if (!result) {
+        printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 内存分配失败\n");
+        return NULL;
+    }
+
+    // 清空字符串
+    result[0] = '\0';
+    size_t current_len = 0;
+
+    // 添加时间戳
+    time_t now = zig_get_timestamp();
+    char time_str[25];
+    snprintf(time_str, sizeof(time_str), "time=%ld&", now);
+    strncat(result, time_str, estimated_len - current_len - 1);
+    current_len = strlen(result);
+    printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 添加时间戳 time=%ld\n", now);
+
+    // 用于跟踪当前设备
+    char current_device[50] = "";
+
+    // 遍历所有点位
+    for (int i = 0; i < ctx->target_count; i++) {
+        target_point_t *target = &ctx->targets[i];
+
+        // 检查是否是新设备
+        if (strcmp(current_device, target->device_name) != 0) {
+            // 添加设备标识符
+            char dn_str[60]; // DN= + 设备名 + &
+            snprintf(dn_str, sizeof(dn_str), "DN=%s&", target->device_name);
+            strncat(result, dn_str, estimated_len - current_len - 1);
+            current_len = strlen(result);
+
+            // 更新当前设备
+            strncpy(current_device, target->device_name, sizeof(current_device) - 1);
+            current_device[sizeof(current_device) - 1] = '\0';
+
+            printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 切换到新设备 %s\n", target->device_name);
+        }
+
+        // 添加点位数据（保留6位小数）
+        char point_str[85]; // 点位名 + = + 数值 + &
+        snprintf(point_str, sizeof(point_str), "%s=%.6f&", target->point_name, target->current_value);
+        strncat(result, point_str, estimated_len - current_len - 1);
+        current_len = strlen(result);
+
+        printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 添加点位 %s=%.6f\n",
+               target->point_name, target->current_value);
+    }
+
+    // 移除最后一个&符号
+    if (current_len > 0 && result[current_len - 1] == '&') {
+        result[current_len - 1] = '\0';
+        current_len--;
+    }
+
+    printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 数据准备完成，最终长度=%zu\n", current_len);
+    printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 结果: %s\n", result);
+
+    return result;
+}
+
+// 准备上报数据（JSON格式）- 保留原有函数用于兼容性
+static char* prepare_report_data(collector_ctx_t *ctx)
+{
+    printf("[DATA_COLLECTOR] prepare_report_data: 开始准备上报数据\n");
+    //上报数据格式
+    /*
+    上报数据格式：DN=DeviceName1&node0101=123&node2=xxx&node3=xxx&DN=xx&node1=xxx&node2=xxx
+    time=xxxx&DN= DeviceName1 从设备名称：DeviceName1 两个DN中间是它的所有上报属性
+    node0101=123  数据点名称：node0101 数据点值：123
+    */
+
+    return NULL;
+}
+
+// 独立的Cloud数据上报接口
+int collector_report_data(collector_ctx_t *ctx)
+{
+    if (!ctx) {
+        printf("[Collector] Report error: invalid context\n");
+        return -1;
+    }
+
+    // 检查是否需要上报
+    if (!should_report_data(ctx)) {
+        printf("[Collector] Skip report: conditions not met\n");
+        return 0;
+    }
+    printf("[Collector] should_report_data: 1\n");
+    collector_sync_data(ctx);
+
+    // 准备上报数据（URL编码格式）
+    char *report_data = prepare_report_data_urlencoded(ctx);
+    if (!report_data) {
+        printf("[Collector] Report error: failed to prepare data\n");
+        return -1;
+    }
+    printf("[Collector] Report data: %s\n", report_data);
+
+    #if 0
+    // 调用私有云接口上报
+
+    int rc = hlk_mqtt_publish("DataPointsUp", QOS0, report_data, strlen(report_data));
+    if (rc != 0) {
+        printf("[Collector] Report error: failed to publish data\n");
+        //发送失败， 离线缓存数据
+    }
+    #endif
+
+    // 释放内存
+    free(report_data);
+
+    return 0;
 }
 
 void collector_destroy(collector_ctx_t *ctx) 
