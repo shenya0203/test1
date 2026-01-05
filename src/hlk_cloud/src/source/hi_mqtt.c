@@ -67,6 +67,25 @@ double __difftime64(time_t time1, time_t time0) {
     return difftime(time1, time0);
 }
 
+#include <sys/stat.h> 
+// ========================================================
+// 【新增】补充缺失的 stat/fstat Time64 兼容接口
+// ========================================================
+__attribute__((visibility("default")))
+int __fstat_time64(int fd, struct stat *st) {
+    return fstat(fd, st);
+}
+
+__attribute__((visibility("default")))
+int __stat_time64(const char *path, struct stat *st) {
+    return stat(path, st);
+}
+
+__attribute__((visibility("default")))
+int __lstat_time64(const char *path, struct stat *st) {
+    return lstat(path, st);
+}
+
 #endif
 // ============================================================================
 
@@ -2517,7 +2536,7 @@ void switch_mqtt_url(char **url)
     int ret = -1;
 
     // 查询MQTT和WEB地址
-    while(ret != 1)
+    while (ret != 1)
     {
         ret = query_request_address();
         PRF("query_request_address ret = %d\n", ret);
@@ -2530,9 +2549,8 @@ void switch_mqtt_url(char **url)
             // 添加备用地址
             strncpy(url_store[1], MQTT_URL, MQTT_URL_LEN-1);
             url_store[1][MQTT_URL_LEN-1] = '\0';
-        } else {
-            app_msleep(1000);
         }
+        
         app_msleep(1000);
     }
     *url = url_store[0];

@@ -19,7 +19,7 @@ EXTRA_CFLAGS := #-DDEBUG #-m32
 
 #定义一些变量，编译链接时使用
 INC_DIR   = ./include ./platform/          #include目录
-SRC_DIR   = source/ MQTTPacket/ client/    #源代码目录，表示编译时去当前SRC_DIR目录下查找源文件
+SRC_DIR   = source/ MQTTPacket/ client/ modbus_collector/    #源代码目录，表示编译时去当前SRC_DIR目录下查找源文件
 
 ifeq ($(CONFIG_SUPPORT_OPENWRT), y)
 EXTRA_CFLAGS += -DSUPPORT_OPENWRT

@@ -1,12 +1,16 @@
 // 导入Zig标准库
 const std = @import("std");
+const modbus_collector = @cImport({
+    // 导入自定义头文件
+    // 路径相对于 src/hlk_cloud/src
+    @cInclude("modbus_collector/data_collector.h");
+});
 
 // 导入 C 函数声明
 // extern 表示这是外部函数声明，通常用于 C 函数
 // "c" 表示 C 调用约定
 extern "c" fn hi_link_init() c_int;
 extern "c" fn sleep(seconds: c_uint) c_int;
-
 // 直接声明C库的休眠函数
 extern "c" fn usleep(microseconds: c_uint) c_int;
 
@@ -134,19 +138,147 @@ export fn zig_set_timesync(timestamp: i64) c_int {
     return result;
 }
 
-// 定义主函数 main()
-pub fn main() !void {
-    // 调用 C 函数启动MQTT主程序
-    const result = hi_link_init();
+// -----------------------------------------------------------
+// Modbus Shared Memory Handler (Zig Implementation) - Final Fix
+// -----------------------------------------------------------
 
-    // 检查初始化结果
-    if (result != 0) {
-        std.process.exit(@intCast(result));
+const builtin = @import("builtin");
+
+// 定义导出给 C 使用的结构体
+pub const ZigShmResult = extern struct {
+    fd: c_int,
+    ptr: ?*anyopaque,
+    size: usize,
+    success: c_char,
+};
+
+// MT7688 (MIPS32) 的页面大小固定为 4096
+// 使用 comptime 常量以满足 @alignCast 的要求
+const PAGE_SIZE: usize = 4096;
+
+// 导出函数：打开并映射共享内存
+export fn zig_map_modbus_shm(path_c: [*:0]const u8, out_result: *ZigShmResult) void {
+    const path = std.mem.span(path_c);
+    std.debug.print("[Zig-Shm] Start mapping: {s}\n", .{path});
+
+    out_result.success = 0;
+    out_result.fd = -1;
+    out_result.ptr = null;
+    out_result.size = 0;
+
+    const file = std.fs.openFileAbsolute(path, .{ .mode = .read_only }) catch |err| {
+        std.debug.print("[Zig-Shm] Open failed: {}\n", .{err});
+        return;
+    };
+    errdefer file.close();
+
+    const stat = file.stat() catch |err| {
+        std.debug.print("[Zig-Shm] Stat failed: {}\n", .{err});
+        return;
+    };
+
+    std.debug.print("[Zig-Shm] File size: {d} bytes\n", .{stat.size});
+
+    if (stat.size == 0) {
+        std.debug.print("[Zig-Shm] Error: File size is 0\n", .{});
+        return;
     }
 
+    const size_usize: usize = @intCast(stat.size);
+
+    // 修复1: 使用 @bitCast 强制构造 MIPS 架构的 MAP 标志
+    // 在 MIPS Linux 上，std.posix.MAP 是 packed struct(u32)，且 SHARED 对应 0x01
+    const map_flags: std.posix.MAP = @bitCast(@as(u32, 1));
+
+    const mmap_ptr = std.posix.mmap(null, size_usize, std.posix.PROT.READ, map_flags, file.handle, 0) catch |err| {
+        std.debug.print("[Zig-Shm] Mmap failed: {}\n", .{err});
+        return;
+    };
+
+    std.debug.print("[Zig-Shm] Mmap success at: {*}\n", .{mmap_ptr.ptr});
+
+    out_result.fd = file.handle;
+    out_result.ptr = mmap_ptr.ptr;
+    out_result.size = size_usize;
+    out_result.success = 1;
+}
+
+// 导出函数：清理共享内存
+export fn zig_unmap_modbus_shm(ptr: *anyopaque, size: usize, fd: c_int) void {
+    std.debug.print("[Zig-Shm] Unmapping ptr={*}, size={d}, fd={d}\n", .{ ptr, size, fd });
+
+    // 修复2: 使用硬编码的 PAGE_SIZE 进行对齐转换
+    // 1. 转为非对齐指针
+    const u8_ptr = @as([*]u8, @ptrCast(ptr));
+    // 2. 转为对齐指针 (PAGE_SIZE 是 comptime known)
+    const aligned_ptr: [*]align(PAGE_SIZE) u8 = @alignCast(u8_ptr);
+    // 3. 创建切片
+    const slice = aligned_ptr[0..size];
+
+    std.posix.munmap(slice);
+
+    if (fd != -1) {
+        std.posix.close(fd);
+    }
+}
+
+// 导出函数：检查共享内存文件是否仍然有效（Inode 检查）
+// 返回 true 表示有效，false 表示文件已变更或不存在
+export fn zig_check_shm_inode(fd: c_int, path_c: [*:0]const u8) bool {
+    const path = std.mem.span(path_c);
+
+    // 1. 获取当前文件路径的 Stat (新状态)
+    const file = std.fs.openFileAbsolute(path, .{ .mode = .read_only }) catch {
+        // 如果无法打开文件（例如文件被删除了），说明失效
+        return false;
+    };
+    defer file.close();
+
+    const new_stat = file.stat() catch return false;
+
+    // 2. 获取当前持有 FD 的 Stat (旧状态)
+    // 在 Zig 中，我们需要通过 std.os (或 std.posix) 调用 fstat
+    // 由于 Zig 版本差异，这里使用针对 MT7688 (MIPS) 的底层 stat 结构比较
+    // 简单起见，我们假设如果 inode 不匹配，文件就是换了
+
+    // 这里我们直接比较 inode。
+    // 注意：std.fs.File.stat() 返回的是抽象的 Stat 结构
+
+    // 获取旧 FD 的 stat
+    // 这是一个 trick：为了在 Zig 中对原始 FD 做 stat，我们把它包装成 File
+    // 注意：不要 close 这个 dummy_file，否则会关闭外部传入的 fd
+    const dummy_file = std.fs.File{ .handle = fd };
+    const old_stat = dummy_file.stat() catch return false;
+
+    // 3. 核心判断：比较 Inode
+    if (new_stat.inode != old_stat.inode) {
+        // Inode 不同，说明文件被删除并重新创建了（生产者重启了）
+        return false;
+    }
+
+    return true;
+}
+
+// 定义主函数 main()
+pub fn main() !void {
+    const collector_ctx: *modbus_collector.collector_ctx_t = modbus_collector.collector_init();
+
+    // 调用 C 函数启动MQTT主程序
+
+    //const result = hi_link_init();
+
+    // // 检查初始化结果
+    // if (result != 0) {
+    //     std.process.exit(@intCast(result));
+    // }
+
+    //数据采集初始化
     // 初始化成功后，主线程需要卡住等待，避免进程退出
     // 这样后台线程或服务可以继续运行
     while (true) {
+        std.debug.print("main loop\r\n", .{});
+        modbus_collector.collector_sync_data(collector_ctx);
+
         // 每秒检查一次，保持进程运行
         _ = sleep(1);
     }

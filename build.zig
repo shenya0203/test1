@@ -14,6 +14,9 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // 全局调试选项
+    const is_debug = b.option(bool, "debug", "Build with debug symbols") orelse false;
+
     // 定义平台配置列表
     const platforms = [_]PlatformConfig{
         .{
@@ -62,7 +65,7 @@ pub fn build(b: *std.Build) void {
 
     // 为每个平台创建构建步骤
     for (platforms) |platform| {
-        createPlatformBuildStep(b, platform, mod);
+        createPlatformBuildStep(b, platform, mod, is_debug);
     }
 
     // 生成通用的版本头文件（在默认构建时生成）
@@ -85,6 +88,12 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+
+    // 添加包含路径以支持 @cImport
+    exe.root_module.addIncludePath(b.path("src/hlk_cloud/src/include"));
+    exe.root_module.addIncludePath(b.path("src/hlk_cloud/src/source"));
+    exe.root_module.addIncludePath(b.path("src/hlk_cloud/src"));
+
     b.installArtifact(exe);
 
     // 运行步骤
@@ -113,7 +122,7 @@ pub fn build(b: *std.Build) void {
 }
 
 // 为特定平台创建构建步骤
-fn createPlatformBuildStep(b: *std.Build, platform: PlatformConfig, mod: *std.Build.Module) void {
+fn createPlatformBuildStep(b: *std.Build, platform: PlatformConfig, mod: *std.Build.Module, is_debug: bool) void {
     const step = b.step(platform.name, std.fmt.allocPrint(b.allocator, "Build for {s} ({s})", .{ platform.name, platform.product_id }) catch unreachable);
 
     // 为当前平台生成版本头文件（如果不存在）
@@ -136,8 +145,8 @@ fn createPlatformBuildStep(b: *std.Build, platform: PlatformConfig, mod: *std.Bu
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = b.resolveTargetQuery(platform.arch),
-            .optimize = .ReleaseSmall, // 嵌入式设备使用最小体积优化
-            .strip = true, // 移除符号表减少体积
+            .optimize = if (is_debug) .Debug else .ReleaseSmall, // 调试时使用Debug优化
+            .strip = !is_debug, // 调试时保留符号表
             .single_threaded = platform.single_threaded,
             .imports = &.{
                 .{ .name = "hlk_cloud", .module = mod },
@@ -235,6 +244,7 @@ fn addCSourceFiles(b: *std.Build, exe: *std.Build.Step.Compile, product_id: []co
         "-DSUPPORT_OPENWRT",
         "-DENABLE_CURL",
         "-D__MUSL__", // 明确标识为Musl环境
+        "-g", // 添加调试信息
         // 强制32位时间ABI兼容性 (与GCC 8.4 musl legacy环境匹配)
         "-U_TIME_BITS", // 取消默认的_TIME_BITS定义
         "-D_TIME_BITS=32", // 强制使用32位时间类型
@@ -261,7 +271,7 @@ fn addCSourceFiles(b: *std.Build, exe: *std.Build.Step.Compile, product_id: []co
     addCSourcesFromDir(allocator, &c_files, "src/hlk_cloud/src/client");
     addCSourcesFromDir(allocator, &c_files, "src/hlk_cloud/src/openwrt");
     addCSourcesFromDir(allocator, &c_files, "src/hlk_cloud/src/linux");
-
+    addCSourcesFromDir(allocator, &c_files, "src/hlk_cloud/src/modbus_collector");
     // 添加特定平台的C文件
     const platform_dir = std.fmt.allocPrint(allocator, "src/hlk_cloud/src/platform/{s}", .{product_id}) catch unreachable;
     addCSourcesFromDir(allocator, &c_files, platform_dir);
@@ -274,6 +284,8 @@ fn addCSourceFiles(b: *std.Build, exe: *std.Build.Step.Compile, product_id: []co
     for (include_paths) |path| {
         flags.append(allocator, "-I") catch unreachable;
         flags.append(allocator, path) catch unreachable;
+        // 【新增】这一行非常重要！让 Zig 的 @cImport 也能找到这些路径
+        exe.addIncludePath(b.path(path));
     }
 
     // 为每个C文件添加编译步骤
