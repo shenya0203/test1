@@ -218,18 +218,36 @@ int keepalive(MQTTClient* c)
     if (c->keepAliveInterval == 0)
         goto exit;
 
-    if (TimerIsExpired(&c->last_sent) || TimerIsExpired(&c->last_received))
+    // 分开判断，逻辑更清晰
+    int sent_expired = TimerIsExpired(&c->last_sent);
+    int received_expired = TimerIsExpired(&c->last_received);
+
+    if (sent_expired || received_expired)
     {
+        // 如果已经有 Ping 发出去了
         if (c->ping_outstanding)
-            rc = FAILURE; /* PINGRESP not received in keepalive interval */
+        {
+            // 只有当“发送计时器”也过期了，才认为是真正的超时。
+            // 这意味着我们发送 Ping 后，经过了一个完整的 keepAliveInterval 还没收到回复。
+            // 如果仅仅是 received_expired (接收超时)，那是正常的等待过程。
+            if (sent_expired) {
+                rc = FAILURE; /* PINGRESP not received in keepalive interval */
+                printf("Keepalive failure: Ping outstanding and send timer expired\n");
+            }
+            // 否则，虽然 received_expired 为真，但我们还在等待 Ping 回复，不算失败
+        }
         else
         {
+            // 发送 Ping 请求
             Timer timer;
             TimerInit(&timer);
             TimerCountdownMS(&timer, 1000);
             int len = MQTTSerialize_pingreq(c->buf, c->buf_size);
             if (len > 0 && (rc = sendPacket(c, len, &timer)) == SUCCESS) // send the ping packet
+            {
                 c->ping_outstanding = 1;
+                // 注意：sendPacket 内部已经重置了 last_sent
+            }
         }
     }
 
@@ -262,12 +280,14 @@ int cycle(MQTTClient* c, Timer* timer)
         rc = SUCCESS;
 
     int packet_type = readPacket(c, timer);     /* read the socket, see what work is due */
+    //printf("MQTT cycle: packet_type %d\n", packet_type);
 
     switch (packet_type)
     {
         default:
             /* no more data to read, unrecoverable. Or read packet fails due to unexpected network error */
             rc = packet_type;
+            printf("MQTT read error %d\n", rc);
             goto exit;
         case 0: /* timed out reading packet */
             break;
@@ -297,12 +317,15 @@ int cycle(MQTTClient* c, Timer* timer)
                     len = MQTTSerialize_ack(c->buf, c->buf_size, PUBREC, 0, msg.id);
                 if (len <= 0)
                 {
+                    printf("MQTT Serialize ack error\n");
                     rc = FAILURE;
                 }
-                else
+                else {
                     rc = sendPacket(c, len, timer);
+                }
                 if (rc == FAILURE)
                 {
+                    printf("MQTT send ack error\n");
                     goto exit; // there was a problem
                 }
             }
@@ -341,7 +364,8 @@ int cycle(MQTTClient* c, Timer* timer)
     }
 
     if (keepalive(c) != SUCCESS) {
-        //check only keepalive FAILURE status so that previous FAILURE status can be considered as FAULT
+        //check only keepalive FAILURE status so that previous FAILURE status can be considered as FAULT'
+        printf("MQTT keepalive error\n");
         rc = FAILURE;
     }
 

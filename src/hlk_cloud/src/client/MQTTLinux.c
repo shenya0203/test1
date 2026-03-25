@@ -30,6 +30,7 @@ char TimerIsExpired(Timer* timer)
 	zig_timeval now, res;
 	zig_gettimeofday(&now, NULL);
 	timersub(&timer->end_time, &now, &res);
+	//printf("TimerIsExpired: res.tv_sec=%ld, res.tv_usec=%ld\n", res.tv_sec, res.tv_usec);
 	return res.tv_sec < 0 || (res.tv_sec == 0 && res.tv_usec <= 0);
 }
 

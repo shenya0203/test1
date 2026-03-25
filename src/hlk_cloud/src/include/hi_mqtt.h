@@ -83,6 +83,10 @@ extern "C" {
 #define ServerToWifi "ServerToWifi"
 #define InputData "InputData"
 
+#define MQTT_CONNECT_STATUS_CONNECTING 1
+#define MQTT_CONNECT_STATUS_CONNECTED 2
+#define MQTT_CONNECT_STATUS_DISCONNECTED 3
+
 // sys/{ProductKey}/{DeviceCode}/thing/property/post
 /* 数据上报及回复 */
 //#define TOPIC_POST "sys/%s/%s/thing/property/post"
@@ -205,6 +209,8 @@ typedef enum
     TOPIC_RESET,
     TOPIC_RESET_REPLY,
     TOPIC_APP,
+    DATA_POINTS_UP,
+    DATA_POINTS_DOWN,
     MQTT_TOPIC_TYPE_END
 }MQTT_TOPIC_TYPE_E;
 

@@ -7,6 +7,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <dirent.h> // 新增：用于目录遍历
+#include <time.h>   // 新增：用于时间戳
+#include <sys/types.h> // 新增：用于 mkdir
 #include "cJSON.h"
 #include "app_api.h"
 #include "data_collector.h"
@@ -32,6 +34,11 @@ typedef struct {
     double data[];
 } modbus_shm_t;
 
+// --- 缓存管理宏定义 ---
+#define CACHE_DIR "/mnt/data/modbus_cache/"
+#define MAX_CACHE_FILE_SIZE (8 * 1024) // 8KB
+#define MAX_TOTAL_CACHE_SIZE (1024 * 1024) // 1MB
+
 // --- 辅助函数 ---
 
 // 检查文件名后缀是否为 .json
@@ -39,6 +46,339 @@ static int is_json_file(const char *filename) {
     const char *dot = strrchr(filename, '.');
     if (!dot || dot == filename) return 0;
     return strcmp(dot, ".json") == 0;
+}
+
+// 检查文件名是否为缓存文件 (cloud_*.cache)
+static int is_cache_file(const char *filename) {
+    if (!filename || strlen(filename) < 11) return 0; // "cloud_.cache" 最短长度
+    return strncmp(filename, "cloud_", 6) == 0 && strstr(filename, ".cache") != NULL;
+}
+
+// 获取缓存文件名中的时间戳 (从 "cloud_<timestamp>.cache" 中提取 timestamp)
+static time_t get_cache_file_timestamp(const char *filename) {
+    if (!is_cache_file(filename)) return 0;
+
+    const char *start = filename + 6; // 跳过 "cloud_"
+    const char *end = strstr(start, ".cache");
+    if (!end) return 0;
+
+    char timestamp_str[32] = {0};
+    size_t len = end - start;
+    if (len >= sizeof(timestamp_str)) return 0;
+
+    strncpy(timestamp_str, start, len);
+    timestamp_str[len] = '\0';
+
+    return (time_t)atol(timestamp_str);
+}
+
+// 获取缓存目录下的所有缓存文件列表，按时间戳排序（最旧的在前）
+static char** get_cache_files_list(int *count) {
+    if (!count) return NULL;
+    *count = 0;
+
+    DIR *dir = opendir(CACHE_DIR);
+    if (!dir) {
+        // 目录不存在，尝试创建
+        mkdir(CACHE_DIR, 0755);
+        return NULL;
+    }
+
+    struct dirent *ent;
+    char **files = NULL;
+    int capacity = 0;
+
+    while ((ent = readdir(dir)) != NULL) {
+        if (ent->d_type == DT_REG && is_cache_file(ent->d_name)) {
+            if (*count >= capacity) {
+                capacity = capacity == 0 ? 16 : capacity * 2;
+                char **new_files = realloc(files, capacity * sizeof(char*));
+                if (!new_files) {
+                    closedir(dir);
+                    if (files) free(files);
+                    return NULL;
+                }
+                files = new_files;
+            }
+
+            files[*count] = strdup(ent->d_name);
+            if (!files[*count]) {
+                closedir(dir);
+                for (int i = 0; i < *count; i++) free(files[i]);
+                free(files);
+                return NULL;
+            }
+            (*count)++;
+        }
+    }
+    closedir(dir);
+
+    if (*count == 0) {
+        free(files);
+        return NULL;
+    }
+
+    // 按时间戳排序（冒泡排序，最旧的在前）
+    for (int i = 0; i < *count - 1; i++) {
+        for (int j = 0; j < *count - i - 1; j++) {
+            time_t ts1 = get_cache_file_timestamp(files[j]);
+            time_t ts2 = get_cache_file_timestamp(files[j + 1]);
+            if (ts1 > ts2) {
+                char *temp = files[j];
+                files[j] = files[j + 1];
+                files[j + 1] = temp;
+            }
+        }
+    }
+
+    return files;
+}
+
+// 清理文件列表内存
+static void free_cache_files_list(char **files, int count) {
+    if (!files) return;
+    for (int i = 0; i < count; i++) {
+        if (files[i]) free(files[i]);
+    }
+    free(files);
+}
+
+// 检查并清理磁盘空间，确保总缓存大小不超过限制
+static int check_and_clean_disk_space(void) {
+    DIR *dir = opendir(CACHE_DIR);
+    if (!dir) {
+        mkdir(CACHE_DIR, 0755);
+        return 0;
+    }
+
+    size_t total_size = 0;
+    struct dirent *ent;
+
+    // 计算总大小
+    while ((ent = readdir(dir)) != NULL) {
+        if (ent->d_type == DT_REG && is_cache_file(ent->d_name)) {
+            char full_path[512];
+            snprintf(full_path, sizeof(full_path), "%s%s", CACHE_DIR, ent->d_name);
+
+            struct stat st;
+            if (stat(full_path, &st) == 0) {
+                total_size += st.st_size;
+            }
+        }
+    }
+    closedir(dir);
+
+    // 如果总大小超过限制，删除最旧的文件
+    while (total_size > MAX_TOTAL_CACHE_SIZE) {
+        int file_count;
+        char **files = get_cache_files_list(&file_count);
+        if (!files || file_count == 0) {
+            free_cache_files_list(files, file_count);
+            break;
+        }
+
+        // 删除最旧的文件
+        char full_path[512];
+        snprintf(full_path, sizeof(full_path), "%s%s", CACHE_DIR, files[0]);
+
+        struct stat st;
+        if (stat(full_path, &st) == 0) {
+            total_size -= st.st_size;
+        }
+
+        if (unlink(full_path) == 0) {
+            printf("[Cache] Deleted old cache file: %s\n", files[0]);
+        }
+
+        free_cache_files_list(files, file_count);
+    }
+
+    return 0;
+}
+
+// 查找最旧的缓存文件
+static char* find_oldest_cache_file(void) {
+    int file_count;
+    char **files = get_cache_files_list(&file_count);
+    if (!files || file_count == 0) {
+        free_cache_files_list(files, file_count);
+        return NULL;
+    }
+
+    char *oldest_file = files[0];
+    files[0] = NULL; // 防止被释放
+
+    free_cache_files_list(files, file_count);
+    return oldest_file;
+}
+
+// 写入离线缓存数据
+static int write_offline_cache(const char *data) {
+    if (!data) {
+        printf("[Cache] Error: invalid data to cache\n");
+        return -1;
+    }
+
+    // 检查并清理磁盘空间
+    if (check_and_clean_disk_space() != 0) {
+        printf("[Cache] Error: failed to clean disk space\n");
+        return -1;
+    }
+
+    // 查找最新的缓存文件
+    char latest_file[256] = {0};
+    time_t latest_timestamp = 0;
+
+    DIR *dir = opendir(CACHE_DIR);
+    if (!dir) {
+        mkdir(CACHE_DIR, 0755);
+        dir = opendir(CACHE_DIR);
+        if (!dir) {
+            printf("[Cache] Error: cannot open cache directory\n");
+            return -1;
+        }
+    }
+
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        if (ent->d_type == DT_REG && is_cache_file(ent->d_name)) {
+            time_t ts = get_cache_file_timestamp(ent->d_name);
+            if (ts > latest_timestamp) {
+                latest_timestamp = ts;
+                strncpy(latest_file, ent->d_name, sizeof(latest_file) - 1);
+            }
+        }
+    }
+    closedir(dir);
+
+    char full_path[512];
+    int need_new_file = 1;
+
+    if (latest_file[0] != '\0') {
+        // 检查现有文件大小
+        snprintf(full_path, sizeof(full_path), "%s%s", CACHE_DIR, latest_file);
+        struct stat st;
+        if (stat(full_path, &st) == 0 && st.st_size < MAX_CACHE_FILE_SIZE) {
+            need_new_file = 0;
+        }
+    }
+
+    if (need_new_file) {
+        // 创建新文件
+        time_t now = zig_get_timestamp();
+        snprintf(latest_file, sizeof(latest_file), "cloud_%lld.cache", now);
+        snprintf(full_path, sizeof(full_path), "%s%s", CACHE_DIR, latest_file);
+    }
+
+    // 追加写入数据（以换行符结尾）
+    FILE *fp = fopen(full_path, "a");
+    if (!fp) {
+        printf("[Cache] Error: cannot open cache file %s for writing\n", full_path);
+        return -1;
+    }
+
+    fprintf(fp, "%s\n", data);
+    fclose(fp);
+
+    printf("[Cache] Successfully cached data to %s\n", latest_file);
+    return 0;
+}
+
+// 处理一个缓存文件（逐行发送，发送成功后删除文件）
+static int flush_one_cache_file(void) {
+    char *oldest_file = find_oldest_cache_file();
+    if (!oldest_file) {
+        return 0; // 没有缓存文件
+    }
+
+    char full_path[512];
+    snprintf(full_path, sizeof(full_path), "%s%s", CACHE_DIR, oldest_file);
+
+    FILE *fp = fopen(full_path, "r");
+    if (!fp) {
+        printf("[Cache] Error: cannot open cache file %s for reading\n", full_path);
+        free(oldest_file);
+        return -1;
+    }
+
+    printf("[Cache] Processing cache file: %s\n", oldest_file);
+
+    char *line = NULL;
+    size_t len = 0;
+    int success_count = 0;
+    int fail_count = 0;
+
+    // 创建临时文件来保存未发送成功的数据
+    char temp_path[512];
+    snprintf(temp_path, sizeof(temp_path), "%s.temp", full_path);
+    FILE *temp_fp = NULL;
+
+    while (getline(&line, &len, fp) != -1) {
+        // 移除行末的换行符
+        size_t line_len = strlen(line);
+        if (line_len > 0 && line[line_len - 1] == '\n') {
+            line[line_len - 1] = '\0';
+            line_len--;
+        }
+        if (line_len == 0) continue; // 跳过空行
+
+        // 发送数据
+        int rc = hlk_mqtt_publish(mqtt_topic_type_table[DATA_POINTS_UP].topic, QOS0, line, strlen(line));
+        if (rc == 0) {
+            success_count++;
+            printf("[Cache] Successfully sent cached data: %s\n", line);
+        } else {
+            fail_count++;
+            printf("[Cache] Failed to send cached data: %s\n", line);
+
+            // 如果还没有创建临时文件，现在创建
+            if (!temp_fp) {
+                temp_fp = fopen(temp_path, "w");
+                if (!temp_fp) {
+                    printf("[Cache] Error: cannot create temp file %s\n", temp_path);
+                    break;
+                }
+            }
+
+            // 将失败的数据写入临时文件
+            fprintf(temp_fp, "%s\n", line);
+        }
+    }
+
+    free(line);
+    fclose(fp);
+
+    if (temp_fp) {
+        fclose(temp_fp);
+
+        // 如果有未发送的数据，替换原文件
+        if (fail_count > 0) {
+            if (rename(temp_path, full_path) != 0) {
+                printf("[Cache] Error: cannot rename temp file to %s\n", full_path);
+                unlink(temp_path); // 删除临时文件
+            } else {
+                printf("[Cache] Kept %d failed records in cache file\n", fail_count);
+            }
+        } else {
+            unlink(temp_path); // 删除空的临时文件
+        }
+    }
+
+    // 如果全部发送成功，删除缓存文件
+    if (fail_count == 0 && success_count > 0) {
+        if (unlink(full_path) == 0) {
+            printf("[Cache] Successfully deleted processed cache file: %s (%d records sent)\n",
+                   oldest_file, success_count);
+        } else {
+            printf("[Cache] Error: cannot delete cache file %s\n", full_path);
+        }
+    } else if (fail_count > 0) {
+        printf("[Cache] Partially processed cache file: %s (%d sent, %d failed)\n",
+               oldest_file, success_count, fail_count);
+    }
+
+    free(oldest_file);
+    return fail_count == 0 ? 0 : -1; // 返回0表示完全成功，-1表示部分失败
 }
 
 // 添加点位到全局列表
@@ -293,7 +633,7 @@ static void process_config_file(collector_ctx_t *ctx, const char *full_path, con
     }
 
     // 关键逻辑：只处理 Cloud 模式
-    if (strcmp(link->valuestring, "Cloud") == 0) {
+    if ((strcmp(link->valuestring, "Cloud") == 0) || (strcmp(link->valuestring, "CLOUD") == 0)) {
         printf("[Collector] 检测到Cloud模式，开始解析点位配置 %s\n", filename);
         parse_cloud_content(ctx, json, filename);
         // 解析Cloud上报配置参数
@@ -487,12 +827,11 @@ static int should_report_data(collector_ctx_t *ctx)
     cloud_report_config_t *config = &ctx->report_config;
     time_t now;
     struct tm *tm_now = NULL;
-    printf("[Collector] should_report_data\n");
 
     now = zig_get_timestamp();
     tm_now = zig_get_localtime(&now);
 
-    printf("[Collector] tm_now->tm_hour: %d, tm_now->tm_min: %d, tm_now->tm_sec: %d\n", tm_now->tm_hour, tm_now->tm_min, tm_now->tm_sec);
+    //printf("[Collector] tm_now->tm_hour: %d, tm_now->tm_min: %d, tm_now->tm_sec: %d\n", tm_now->tm_hour, tm_now->tm_min, tm_now->tm_sec);
 
     // 检查周期上报
     if (config->cond.period > 0) {
@@ -505,7 +844,7 @@ static int should_report_data(collector_ctx_t *ctx)
             return 1;
         }
     }
-    printf("[Collector] config->cond.period: %d\n", config->cond.period);
+    //printf("[Collector] config->cond.period: %d\n", config->cond.period);
 
     // 检查定时上报
     if (config->cond.timed.type != 0) {
@@ -576,10 +915,10 @@ static char* prepare_report_data_urlencoded(collector_ctx_t *ctx)
     // 添加时间戳
     time_t now = zig_get_timestamp();
     char time_str[25];
-    snprintf(time_str, sizeof(time_str), "time=%ld&", now);
+    snprintf(time_str, sizeof(time_str), "time=%lld&", now);
     strncat(result, time_str, estimated_len - current_len - 1);
     current_len = strlen(result);
-    printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 添加时间戳 time=%ld\n", now);
+    printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 添加时间戳 time=%lld\n", now);
 
     // 用于跟踪当前设备
     char current_device[50] = "";
@@ -622,7 +961,68 @@ static char* prepare_report_data_urlencoded(collector_ctx_t *ctx)
     printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 数据准备完成，最终长度=%zu\n", current_len);
     printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 结果: %s\n", result);
 
-    return result;
+    // 构建JSON格式数据
+    cJSON *root = cJSON_CreateObject();
+    char *response_str = NULL;
+
+    if (!root) {
+        printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 创建JSON根对象失败\n");
+        free(result);
+        return NULL;
+    }
+
+    // 添加DeviceCode字段
+    cJSON_AddStringToObject(root, "DeviceCode", mqtt_user_cert.deviceName);
+
+    // 创建Items数组
+    cJSON *items_array = cJSON_CreateArray();
+    if (!items_array) {
+        printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 创建Items数组失败\n");
+        cJSON_Delete(root);
+        free(result);
+        return NULL;
+    }
+
+    // 创建单个Item对象
+    cJSON *item = cJSON_CreateObject();
+    if (!item) {
+        printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 创建Item对象失败\n");
+        cJSON_Delete(items_array);
+        cJSON_Delete(root);
+        free(result);
+        return NULL;
+    }
+
+    // 添加Time字段（使用now时间戳）
+    cJSON_AddNumberToObject(item, "Time", now);
+
+    // 添加Name字段（固定为"DataPointsUp"）
+    cJSON_AddStringToObject(item, "Name", "DataPointsUp");
+
+    // 添加Value字段（使用完整的result字符串）
+    cJSON_AddStringToObject(item, "Value", result);
+
+    // 将item添加到数组
+    cJSON_AddItemToArray(items_array, item);
+
+    // 将Items数组添加到根对象
+    cJSON_AddItemToObject(root, "Items", items_array);
+
+    // 生成JSON字符串
+    response_str = cJSON_PrintUnformatted(root);
+    if (!response_str) {
+        printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 生成JSON字符串失败\n");
+        cJSON_Delete(root);
+        free(result);
+        return NULL;
+    }
+
+    // 清理JSON对象
+    cJSON_Delete(root);
+
+    free(result);
+    
+    return response_str;
 }
 
 // 准备上报数据（JSON格式）- 保留原有函数用于兼容性
@@ -639,6 +1039,7 @@ static char* prepare_report_data(collector_ctx_t *ctx)
     return NULL;
 }
 
+
 // 独立的Cloud数据上报接口
 int collector_report_data(collector_ctx_t *ctx)
 {
@@ -649,13 +1050,15 @@ int collector_report_data(collector_ctx_t *ctx)
 
     // 检查是否需要上报
     if (!should_report_data(ctx)) {
-        printf("[Collector] Skip report: conditions not met\n");
+        //printf("[Collector] Skip report: conditions not met\n");
         return 0;
     }
     printf("[Collector] should_report_data: 1\n");
     collector_sync_data(ctx);
 
-    // 准备上报数据（URL编码格式）
+    // ==========================================
+    // 步骤 A：准备数据
+    // ==========================================
     char *report_data = prepare_report_data_urlencoded(ctx);
     if (!report_data) {
         printf("[Collector] Report error: failed to prepare data\n");
@@ -663,20 +1066,57 @@ int collector_report_data(collector_ctx_t *ctx)
     }
     printf("[Collector] Report data: %s\n", report_data);
 
-    #if 0
-    // 调用私有云接口上报
+    int realtime_send_success = 0;
 
-    int rc = hlk_mqtt_publish("DataPointsUp", QOS0, report_data, strlen(report_data));
-    if (rc != 0) {
-        printf("[Collector] Report error: failed to publish data\n");
-        //发送失败， 离线缓存数据
+    // ==========================================
+    // 步骤 B：尝试发送实时数据
+    // ==========================================
+    if (sharedData.connect_status == MQTT_CONNECT_STATUS_CONNECTED) {
+
+        
+        printf("[Collector] MQTT connected, attempting to send realtime data...\n");
+        #if 1
+        int rc = hlk_mqtt_publish(mqtt_topic_type_table[TOPIC_POST].topic, QOS0, report_data, strlen(report_data));
+        if (rc == 0) {
+            printf("[Collector] Realtime data sent successfully\n");
+            realtime_send_success = 1;
+        } else {
+            printf("[Collector] Failed to send realtime data (rc=%d)\n", rc);
+        }
+        #endif
+    } else {
+        printf("[Collector] MQTT not connected (status=%d), skipping realtime send\n",
+               sharedData.connect_status);
+    }
+
+    // ==========================================
+    // 步骤 C：处理缓存（仅在实时发送成功后执行）
+    // ==========================================
+    if (realtime_send_success) {
+        printf("[Collector] Processing cache data...\n");
+        //flush_one_cache_file();
+    } else {
+        printf("[Collector] Skipping cache processing (realtime send failed)\n");
+    }
+
+    #if 0
+    // ==========================================
+    // 步骤 D：保存离线数据
+    // ==========================================
+    if (!realtime_send_success) {
+        printf("[Collector] Saving data to offline cache...\n");
+        if (write_offline_cache(report_data) != 0) {
+            printf("[Collector] Failed to save data to cache\n");
+        }
+    } else {
+        printf("[Collector] Skipping offline cache (realtime send succeeded)\n");
     }
     #endif
 
     // 释放内存
     free(report_data);
 
-    return 0;
+    return realtime_send_success ? 0 : -1;
 }
 
 void collector_destroy(collector_ctx_t *ctx) 
@@ -691,3 +1131,25 @@ void collector_destroy(collector_ctx_t *ctx)
     if (ctx->targets) free(ctx->targets);
     free(ctx);
 }
+
+//处理下发的数据采集
+/******************************************************************************
+ * 函数名    : hlk_mqtt_handle_data_points_down
+ ******************************************************************************/
+ void hlk_mqtt_handle_data_points_down(MessageData *pdata)
+ {
+     int len;
+     char *str = NULL;
+     
+     // 获取消息长度和内容
+     len = pdata->message->payloadlen;
+     str = pdata->message->payload;
+          
+     //解析这个json 把InputData中的Name和Value提取出来
+     cJSON *root = cJSON_Parse(str);
+     if (root == NULL) {
+         return;
+     }
+
+     cJSON_Delete(root);
+ }

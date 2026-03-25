@@ -413,6 +413,18 @@ void hi_link_free_channel_value(hi_link_value_t *value)
     }
 }
 
+void set_cloud_status(int cloud_status)
+{
+	FILE *file = fopen("/tmp/cloud_CLOUD_status", "w");
+	if (file) {
+
+		int status = (cloud_status == MQTT_CONNECT_STATUS_CONNECTED)?1:0;
+		//json数据 格式"connected":0 未连接，1 已连接
+		fprintf(file, "{\"connected\":%d}", status);
+		fclose(file);
+	}
+}
+
  /*****************************************************************************
  *                                APP_FUNCTION                                *
  *****************************************************************************/
@@ -438,13 +450,16 @@ int mqtt_main(struct Options options)
 	unsigned char readbuf[10240]; /* 接收缓冲区 */
 
 	/* MQTT连接重试标签 */
-	conn:
-	sharedData.connect_status = 1;            // 连接状态设为2
+conn:
+	sharedData.connect_status = MQTT_CONNECT_STATUS_CONNECTING;            // 连接状态设为2
 	/* 初始化网络连接对象 */
 	memset(&n, 0, sizeof(Network));
 	NetworkInit(&n);
 	
 	PRF("options.host %s  options.port %d\r\n",options.host, options.port);
+	//创建标识私有云连接的文件
+	system("touch /tmp/cloud_CLOUD_status");
+	set_cloud_status(MQTT_CONNECT_STATUS_CONNECTING);
 
 	/* 尝试连接到MQTT服务器 */
 	rc = NetworkConnect(&n, options.host, options.port);
@@ -568,7 +583,8 @@ static void *hlk_user_main(void *arg)
 	sharedData.c_recv_flag = 0;          /* 客户端接收标志初始化为0 */
 	sharedData.reponse_time_limmit = 5;  /* 设置响应超时时间为5秒 */
 	sharedData.ptopic_packet = NULL;     /* 主题数据包指针初始化为空 */
-	sharedData.connect_status = 0;       /* 连接状态初始化为0 */
+	sharedData.connect_status = MQTT_CONNECT_STATUS_DISCONNECTED;       /* 连接状态初始化为0 */
+	set_cloud_status(MQTT_CONNECT_STATUS_DISCONNECTED);
 	pthread_mutex_init(&sharedData.mutex, NULL);  /* 初始化互斥锁 */
 
 	/* 创建socket处理线程 */

@@ -210,6 +210,8 @@ void hi_link_free_channel_value(hi_link_value_t *value);
 
 void switch_mqtt_url(char **url);
 
+void set_cloud_status(int status);
+
     /*****************************************************************************
      *                                FUNCTION                                    *
      *****************************************************************************/

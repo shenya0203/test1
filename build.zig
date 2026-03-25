@@ -10,6 +10,12 @@ const PlatformConfig = struct {
     single_threaded: bool, // 是否单线程
 };
 
+const c_flags = [_][]const u8{
+    "-Os", // 优化大小
+    "-fdata-sections", // 将数据放在独立段，方便 linker 剔除
+    "-ffunction-sections", // 将函数放在独立段，方便 linker 剔除
+};
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});

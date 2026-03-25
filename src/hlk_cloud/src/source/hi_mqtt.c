@@ -240,6 +240,8 @@ MQTT_PUB_SUB_PATTERN_S mqtt_topic_type_table[] = {
     {TOPIC_RESET,               "sys/%s/%s/thing/event/reset",                  "0"}, // 设备重置主题
     {TOPIC_RESET_REPLY,         "sys/%s/%s/thing/event/reset_reply",            "0"}, // 重置回复主题
     {TOPIC_APP,                 "sys/%s/%s/thing/property/set",                 "0"}, // APP控制主题
+    {DATA_POINTS_UP,            "sys/%s/%s/thing/property/DataPointsUp",        "0"}, //采集数据上报主题
+    {DATA_POINTS_DOWN,          "sys/%s/%s/thing/property/DataPointsDown",    "0"}, //采集数据上报主题
     {MQTT_TOPIC_TYPE_END,       NULL,                                           "0"}  // 结束标记
 };
 
@@ -1016,8 +1018,8 @@ static void hlk_mqtt_handle_ping_reply(MessageData *data)
     // 设置消息流量限制（函数已注释）
     //hlk_mqtt_set_msg_limit(flag->valueint, item->valueint, max_count->valueint);
 
-    sharedData.connect_status = 2;            // 连接状态设为2
-
+    sharedData.connect_status = MQTT_CONNECT_STATUS_CONNECTED;            // 连接状态设为2
+    set_cloud_status(MQTT_CONNECT_STATUS_CONNECTED);
 exit:
     if (root)
     {
@@ -1904,6 +1906,8 @@ exit:
         cJSON_Delete(root);
 }
 
+extern void hlk_mqtt_handle_data_points_down(MessageData *pdata);   //在data_collector.c中定义
+
 /******************************************************************************
  * 函数名    : mqtt_subscribe_parse
  * 功能描述  : 配置MQTT主题订阅和对应的消息处理函数
@@ -1932,6 +1936,9 @@ void mqtt_subscribe_parse()
     
     // 订阅OTA升级主题，绑定OTA升级处理函数
     MQTTSubscribe(hlk_iot.client, mqtt_topic_type_table[TOPIC_UPGRADE].topic, 0, hlk_mqtt_handle_ota);
+
+
+    MQTTSubscribe(hlk_iot.client, mqtt_topic_type_table[DATA_POINTS_DOWN].topic, 0, hlk_mqtt_handle_data_points_down);
 
     return;
 }
@@ -2041,7 +2048,7 @@ int hlk_MQTTYield(SHARED_DATA_S *sharedData)
             MQTTDisconnect(hlk_iot.client);           // 断开MQTT连接
             NetworkDisconnect(hlk_iot.network);        // 断开网络连接
             app_msleep(10 * 1000);                     // 等待10秒后重试
-            sharedData->connect_status = 3;            // 连接状态设为0
+            sharedData->connect_status = MQTT_CONNECT_STATUS_DISCONNECTED;            // 连接状态设为0
             break;  // 跳出循环，返回上层进行重连
         }
         

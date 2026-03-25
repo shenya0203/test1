@@ -302,7 +302,7 @@ pub fn main() !void {
     // 初始化成功后，主线程需要卡住等待，避免进程退出
     // 这样后台线程或服务可以继续运行
     while (true) {
-        std.debug.print("main loop\r\n", .{});
+        //std.debug.print("main loop\r\n", .{});
         //modbus_collector.collector_sync_data(collector_ctx);
         _ = modbus_collector.collector_report_data(collector_ctx);
         // 每秒检查一次，保持进程运行
