@@ -7,6 +7,7 @@
 #include "hi_link.h"
 #include "hi_link_ipc.h"
 #include "hi_mqtt.h"
+#include "hlk_log.h"
 
 
 //openwrt系统相关接口
@@ -25,7 +26,7 @@ int hi_link_set_channel_value_openwrt(const char *channel, const hi_link_value_t
     /* 根据通道名称执行不同的设置操作 */
     if (strcmp(channel, "SSID") == 0) {
         if (value->type == HI_LINK_TYPE_STRING && value->data.str_val) {
-            PRF("Setting WiFi SSID: %s\r\n", value->data.str_val);
+            HLK_LOG_INFO("Setting WiFi SSID: %s\r\n", value->data.str_val);
             // 调用系统命令设置SSID
             // uci set wireless.@wifi-iface[0].ssid=value->data.str_val
             // uci commit wireless
@@ -33,17 +34,17 @@ int hi_link_set_channel_value_openwrt(const char *channel, const hi_link_value_t
         }
     } else if (strcmp(channel, "WiFiPassword") == 0) {
         if (value->type == HI_LINK_TYPE_STRING && value->data.str_val) {
-            PRF("Setting WiFi Password\r\n");
+            HLK_LOG_INFO("Setting WiFi Password\r\n");
             // 调用系统命令设置密码
         }
     } else if (strcmp(channel, "Reboot") == 0) {
         if (value->type == HI_LINK_TYPE_BOOL && value->data.bool_val) {
-            PRF("Rebooting system...\r\n");
+            HLK_LOG_INFO("Rebooting system...\r\n");
             system("reboot");
         }
     } else if (strcmp(channel, "LEDBrightness") == 0) {
         if (value->type == HI_LINK_TYPE_INT) {
-            PRF("Setting LED brightness: %d\r\n", value->data.int_val);
+            HLK_LOG_INFO("Setting LED brightness: %d\r\n", value->data.int_val);
             // 设置LED亮度
         }
     }
@@ -79,14 +80,14 @@ int hi_link_get_channel_value_openwrt(const char *channel, hi_link_value_t *valu
 
 void openwrt_upgrade_firmware(void)
 {
-    PRF("openwrt_upgrade_firmware\r\n");
+    HLK_LOG_INFO("openwrt_upgrade_firmware\r\n");
     
     // 方案1：双重fork + execl（最可靠）
     pid_t pid1 = fork();
     if (pid1 == 0) {
         // 第一个子进程
         if (setsid() == -1) {
-            PRF("setsid failed\r\n");
+            HLK_LOG_ERR("setsid failed\r\n");
             exit(1);
         }
         
@@ -111,7 +112,7 @@ void openwrt_upgrade_firmware(void)
             
             // 等待父进程完成清理
             sleep(5);
-            PRF("start upgrade.\n");
+            HLK_LOG_INFO("start upgrade.\n");
             
             // 直接执行 sysupgrade，避免 shell
             execl("/sbin/sysupgrade", "sysupgrade", 
@@ -120,22 +121,22 @@ void openwrt_upgrade_firmware(void)
                   (char *)NULL);
             
             // 如果 execl 失败，记录日志并退出
-            PRF("execl sysupgrade failed\r\n");
+            HLK_LOG_ERR("execl sysupgrade failed\r\n");
             exit(1);
             
         } else if (pid2 > 0) {
             // 第一个子进程立即退出，让孙进程被 init 接管
             exit(0);
         } else {
-            PRF("second fork failed\r\n");
+            HLK_LOG_ERR("second fork failed\r\n");
             exit(1);
         }
     } else if (pid1 > 0) {
         // 父进程等待第一个子进程退出，避免僵尸进程
         int status;
         waitpid(pid1, &status, 0);
-        PRF("Upgrade daemon started\r\n");
+        HLK_LOG_INFO("Upgrade daemon started\r\n");
     } else {
-        PRF("first fork failed\r\n");
+        HLK_LOG_ERR("first fork failed\r\n");
     }
 }

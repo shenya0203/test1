@@ -36,7 +36,7 @@
 #endif
 
 #include "hi_cfm_version.h" // 版本信息头文件
-
+#include "hlk_log.h"        // 日志相关头文件
 #include "app_api.h"        // 应用API头文件
 #include "hi_mqtt.h"        // MQTT协议相关头文件
 
@@ -370,7 +370,7 @@ void get_mem_info(unsigned long *total_memory,unsigned long *free_memory)
     
     // 获取系统信息
     if (sysinfo(&info) != 0) {
-        printf("Failed to get system information.\n");
+        HLK_LOG_ERR("Failed to get system information.\n");
         return;
     }
 
@@ -379,8 +379,8 @@ void get_mem_info(unsigned long *total_memory,unsigned long *free_memory)
     *free_memory = info.freeram * info.mem_unit;    // 可用内存 = 空闲页数 × 页大小
 
     // 调试输出
-    printf("Total memory: %ld bytes\n", *total_memory);
-    printf("Free memory: %ld bytes\n", *free_memory);
+    HLK_LOG_INFO("Total memory: %ld bytes\n", *total_memory);
+    HLK_LOG_INFO("Free memory: %ld bytes\n", *free_memory);
 
     return;
 }
@@ -435,7 +435,7 @@ void get_cpu_info(float *cpu_rate) {
 
     FILE *stat_file = fopen("/proc/stat", "r");
     if (stat_file == NULL) {
-        printf("Failed to open /proc/stat file.\n");
+        HLK_LOG_ERR("Failed to open /proc/stat file.\n");
         *cpu_rate = 0.0;
         return;
     }
@@ -444,7 +444,7 @@ void get_cpu_info(float *cpu_rate) {
     // 格式: cpu user nice system idle iowait irq softirq steal
     if (fscanf(stat_file, "cpu %llu %llu %llu %llu %llu %llu %llu %llu",
                &user, &nice, &system, &idle_time, &iowait, &irq, &softirq, &steal) != 8) {
-        printf("Failed to read CPU stats from /proc/stat.\n");
+        HLK_LOG_ERR("Failed to read CPU stats from /proc/stat.\n");
         fclose(stat_file);
         *cpu_rate = 0.0;
         return;
@@ -477,7 +477,7 @@ void get_cpu_info(float *cpu_rate) {
     prev_total = total;
     prev_idle = idle;
 
-    printf("CPU usage: %.2f%%\n", *cpu_rate);
+    HLK_LOG_INFO("CPU usage: %.2f%%\n", *cpu_rate);
 }
 
 /******************************************************************************
@@ -501,7 +501,7 @@ void get_local_ip(char *local_ip)
     getWanIpAddress(WAN_INTERFACE, local_ip);
     
     // 调试输出
-    printf("WAN IP address: %s\n", local_ip);
+    HLK_LOG_INFO("WAN IP address: %s\n", local_ip);
     return;
 }
 
@@ -532,14 +532,14 @@ void get_uptime_info(unsigned int *uptime)
 
     uptime_file = fopen("/proc/uptime", "r");
     if (uptime_file == NULL) {
-        printf("Failed to open /proc/uptime file.\n");
+        HLK_LOG_ERR("Failed to open /proc/uptime file.\n");
         *uptime = 0;  // 返回0表示获取失败
         return;
     }
 
     // 读取两个浮点数：系统运行时间和空闲时间
     if (fscanf(uptime_file, "%f %f", &fUptime, &idle_time) != 2) {
-        printf("Failed to read uptime from /proc/uptime file.\n");
+        HLK_LOG_ERR("Failed to read uptime from /proc/uptime file.\n");
         fclose(uptime_file);
         *uptime = 0;  // 返回0表示获取失败
         return;
@@ -548,7 +548,7 @@ void get_uptime_info(unsigned int *uptime)
     // 转换并返回系统运行时间（秒）
     *uptime = (unsigned int)fUptime;
 
-    printf("Device uptime: %u seconds\n", *uptime);
+    HLK_LOG_INFO("Device uptime: %u seconds\n", *uptime);
 
     fclose(uptime_file);
 }
@@ -819,7 +819,7 @@ int message_log_cut(char *acCutEvent)
     // 第一次打开文件：统计总行数
     file = fopen(acCutEvent, "r");
     if (file == NULL) {
-        printf("Unable to open file\n");
+        HLK_LOG_ERR("Unable to open file\n");
         return 1;
     }
 
@@ -837,14 +837,14 @@ int message_log_cut(char *acCutEvent)
         // 重新打开原文件用于读取
         file = fopen(acCutEvent, "r");
         if (file == NULL) {
-            printf("Unable to open file\n");
+            HLK_LOG_ERR("Unable to open file\n");
             return 1;
         }
 
         // 创建临时文件用于写入
         FILE *tempFile = fopen(tempFileName, "w");
         if (tempFile == NULL) {
-            printf("Unable to create temporary file\n");
+            HLK_LOG_ERR("Unable to create temporary file\n");
             return 1;
         }
 
@@ -868,9 +868,9 @@ int message_log_cut(char *acCutEvent)
         remove(acCutEvent);
         rename(tempFileName, acCutEvent);
 
-        printf("The first 100 rows have been deleted\n");
+        HLK_LOG_INFO("The first 100 rows have been deleted\n");
     } else {
-        printf("The number of file lines does not exceed 500\n");
+        HLK_LOG_INFO("The number of file lines does not exceed 500\n");
     }
 
     return 0;
@@ -920,7 +920,7 @@ int message_print(char* fmt, ...)
     struct tm * ptm = localtime(&t.tv_sec);
     if(ptm == NULL)
     {
-        printf("lteOperate.upgrade_print: get local time failed!\n");
+        HLK_LOG_ERR("lteOperate.upgrade_print: get local time failed!\n");
         return -1;
     }
     
@@ -933,7 +933,7 @@ int message_print(char* fmt, ...)
 
     // 确保日志目录存在，如果不存在则创建
     if (mkdirs(SOCKET_PATH) != 0) {
-        printf("Failed to create directory.\n");
+        HLK_LOG_ERR("Failed to create directory.\n");
     }
 
     FILE* file;                                      // 日志文件句柄
@@ -942,7 +942,7 @@ int message_print(char* fmt, ...)
     // 以追加模式打开日志文件
     file = fopen(tmp_file, "a");
     if (file == NULL) {
-        printf("open %s fail\n", tmp_file);
+        HLK_LOG_ERR("open %s fail\n", tmp_file);
         return -1;
     }
 
@@ -1008,9 +1008,9 @@ void app_reboot(void)
     
     // 根据执行结果输出相应信息
     if (result == 0) {
-        printf("Command executed successfully Reboot!\n");
+        HLK_LOG_INFO("Command executed successfully Reboot!\n");
     } else {
-        printf("Command failed to execute\n");
+        HLK_LOG_ERR("Command failed to execute\n");
     }
 }
 
@@ -1052,26 +1052,26 @@ int SYSTEM(const char *command)
     
     // 检查system()调用本身是否失败
     if (status == -1) {
-        printf("Failed to execute command: %s\n", command);
+        HLK_LOG_ERR("Failed to execute command: %s\n", command);
         return -1;
     } else {
         // 分析命令执行状态
         
         // 检查命令是否正常退出
         if (WIFEXITED(status)) {
-            printf("Command executed successfully: %s\n", command);
-            printf("Exit status: %d\n", WEXITSTATUS(status));
+            HLK_LOG_INFO("Command executed successfully: %s\n", command);
+            HLK_LOG_INFO("Exit status: %d\n", WEXITSTATUS(status));
             return WEXITSTATUS(status);  // 返回命令的退出状态码
         } 
         // 检查命令是否被信号终止
         else if (WIFSIGNALED(status)) {
-            printf("Command terminated by signal: %s\n", command);
-            printf("Terminating signal: %d\n", WTERMSIG(status));
+            HLK_LOG_ERR("Command terminated by signal: %s\n", command);
+            HLK_LOG_INFO("Terminating signal: %d\n", WTERMSIG(status));
             return -1;
         } 
         // 其他异常情况
         else {
-            printf("Command did not terminate normally: %s\n", command);
+            HLK_LOG_ERR("Command did not terminate normally: %s\n", command);
             return -1;
         }
     }

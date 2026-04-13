@@ -25,6 +25,7 @@
 
 #include "hi_link_ipc.h"
 #include "hi_link.h"
+#include "hlk_log.h"
 #include "hi_mqtt.h"
 #include "cJSON.h"
 #include "app_api.h"
@@ -900,7 +901,7 @@ static cJSON* handle_get_ota_status(cJSON *params)
 
     if (hlk_ota_read_version(SYSUPGRADE_MSGID_PATH, &versionInfo) < 0){
         // 读取文件失败或文件不存在，说明没有待处理的升级
-        PRF("Read %s err\r\n", SYSUPGRADE_MSGID_PATH);
+        HLK_LOG_ERR("Read %s err\r\n", SYSUPGRADE_MSGID_PATH);
     }
 
     pthread_mutex_lock(&g_ipc_mutex);

@@ -12,6 +12,7 @@
 #include "cJSON.h"
 #include "app_api.h"
 #include "data_collector.h"
+#include "hlk_log.h"
 #include "hi_mqtt.h"
 
 // 共享内存定义保持不变...
@@ -22,6 +23,8 @@ typedef struct {
     char device_name[50];
     char point_name[50];
     int absolute_index;
+    unsigned char decimal_places;            // 小数位数
+    unsigned char value_type;                // 数值类型
 } modbus_index_entry_t;
 
 typedef struct {
@@ -187,7 +190,7 @@ static int check_and_clean_disk_space(void) {
         }
 
         if (unlink(full_path) == 0) {
-            printf("[Cache] Deleted old cache file: %s\n", files[0]);
+            HLK_LOG_INFO("[Cache] Deleted old cache file: %s\n", files[0]);
         }
 
         free_cache_files_list(files, file_count);
@@ -215,13 +218,13 @@ static char* find_oldest_cache_file(void) {
 // 写入离线缓存数据
 static int write_offline_cache(const char *data) {
     if (!data) {
-        printf("[Cache] Error: invalid data to cache\n");
+        HLK_LOG_INFO("[Cache] Error: invalid data to cache\n");
         return -1;
     }
 
     // 检查并清理磁盘空间
     if (check_and_clean_disk_space() != 0) {
-        printf("[Cache] Error: failed to clean disk space\n");
+        HLK_LOG_INFO("[Cache] Error: failed to clean disk space\n");
         return -1;
     }
 
@@ -234,7 +237,7 @@ static int write_offline_cache(const char *data) {
         mkdir(CACHE_DIR, 0755);
         dir = opendir(CACHE_DIR);
         if (!dir) {
-            printf("[Cache] Error: cannot open cache directory\n");
+            HLK_LOG_ERR("[Cache] Error: cannot open cache directory\n");
             return -1;
         }
     }
@@ -273,14 +276,14 @@ static int write_offline_cache(const char *data) {
     // 追加写入数据（以换行符结尾）
     FILE *fp = fopen(full_path, "a");
     if (!fp) {
-        printf("[Cache] Error: cannot open cache file %s for writing\n", full_path);
+        HLK_LOG_ERR("[Cache] Error: cannot open cache file %s for writing\n", full_path);
         return -1;
     }
 
     fprintf(fp, "%s\n", data);
     fclose(fp);
 
-    printf("[Cache] Successfully cached data to %s\n", latest_file);
+    HLK_LOG_INFO("[Cache] Successfully cached data to %s\n", latest_file);
     return 0;
 }
 
@@ -296,12 +299,12 @@ static int flush_one_cache_file(void) {
 
     FILE *fp = fopen(full_path, "r");
     if (!fp) {
-        printf("[Cache] Error: cannot open cache file %s for reading\n", full_path);
+        HLK_LOG_ERR("[Cache] Error: cannot open cache file %s for reading\n", full_path);
         free(oldest_file);
         return -1;
     }
 
-    printf("[Cache] Processing cache file: %s\n", oldest_file);
+    HLK_LOG_INFO("[Cache] Processing cache file: %s\n", oldest_file);
 
     char *line = NULL;
     size_t len = 0;
@@ -326,16 +329,16 @@ static int flush_one_cache_file(void) {
         int rc = hlk_mqtt_publish(mqtt_topic_type_table[DATA_POINTS_UP].topic, QOS0, line, strlen(line));
         if (rc == 0) {
             success_count++;
-            printf("[Cache] Successfully sent cached data: %s\n", line);
+            HLK_LOG_INFO("[Cache] Successfully sent cached data: %s\n", line);
         } else {
             fail_count++;
-            printf("[Cache] Failed to send cached data: %s\n", line);
+            HLK_LOG_ERR("[Cache] Failed to send cached data: %s\n", line);
 
             // 如果还没有创建临时文件，现在创建
             if (!temp_fp) {
                 temp_fp = fopen(temp_path, "w");
                 if (!temp_fp) {
-                    printf("[Cache] Error: cannot create temp file %s\n", temp_path);
+                    HLK_LOG_ERR("[Cache] Error: cannot create temp file %s\n", temp_path);
                     break;
                 }
             }
@@ -354,10 +357,10 @@ static int flush_one_cache_file(void) {
         // 如果有未发送的数据，替换原文件
         if (fail_count > 0) {
             if (rename(temp_path, full_path) != 0) {
-                printf("[Cache] Error: cannot rename temp file to %s\n", full_path);
+                HLK_LOG_ERR("[Cache] Error: cannot rename temp file to %s\n", full_path);
                 unlink(temp_path); // 删除临时文件
             } else {
-                printf("[Cache] Kept %d failed records in cache file\n", fail_count);
+                HLK_LOG_INFO("[Cache] Kept %d failed records in cache file\n", fail_count);
             }
         } else {
             unlink(temp_path); // 删除空的临时文件
@@ -367,13 +370,13 @@ static int flush_one_cache_file(void) {
     // 如果全部发送成功，删除缓存文件
     if (fail_count == 0 && success_count > 0) {
         if (unlink(full_path) == 0) {
-            printf("[Cache] Successfully deleted processed cache file: %s (%d records sent)\n",
+            HLK_LOG_INFO("[Cache] Successfully deleted processed cache file: %s (%d records sent)\n",
                    oldest_file, success_count);
         } else {
-            printf("[Cache] Error: cannot delete cache file %s\n", full_path);
+            HLK_LOG_ERR("[Cache] Error: cannot delete cache file %s\n", full_path);
         }
     } else if (fail_count > 0) {
-        printf("[Cache] Partially processed cache file: %s (%d sent, %d failed)\n",
+        HLK_LOG_INFO("[Cache] Partially processed cache file: %s (%d sent, %d failed)\n",
                oldest_file, success_count, fail_count);
     }
 
@@ -412,21 +415,21 @@ static void add_target_point(collector_ctx_t *ctx, const char *dev, const char *
 // 解析单个文件的 ucld_node 节点
 static void parse_cloud_content(collector_ctx_t *ctx, cJSON *root, const char *filename)
 {
-    printf("[Collector] 开始解析Cloud内容: 文件 %s\n", filename);
+    HLK_LOG_INFO("[Collector] 开始解析Cloud内容: 文件 %s\n", filename);
 
     cJSON *ucld_node = cJSON_GetObjectItem(root, "ucld_node");
     if (!ucld_node) {
-        printf("[Collector] 文件 %s 中未找到 ucld_node 字段\n", filename);
+        HLK_LOG_ERR("[Collector] 文件 %s 中未找到 ucld_node 字段\n", filename);
         return;
     }
 
     if (!cJSON_IsArray(ucld_node)) {
-        printf("[Collector] 文件 %s 中的 ucld_node 不是数组类型\n", filename);
+        HLK_LOG_ERR("[Collector] 文件 %s 中的 ucld_node 不是数组类型\n", filename);
         return;
     }
 
     int count = cJSON_GetArraySize(ucld_node);
-    printf("[Collector] 文件 %s 包含 %d 个设备配置\n", filename, count);
+    HLK_LOG_INFO("[Collector] 文件 %s 包含 %d 个设备配置\n", filename, count);
 
     int added = 0;
     int skipped_devices = 0;
@@ -435,7 +438,7 @@ static void parse_cloud_content(collector_ctx_t *ctx, cJSON *root, const char *f
     for (int i = 0; i < count; i++) {
         cJSON *device = cJSON_GetArrayItem(ucld_node, i);
         if (!device) {
-            printf("[Collector] 文件 %s 第 %d 个设备配置无效\n", filename, i + 1);
+            HLK_LOG_ERR("[Collector] 文件 %s 第 %d 个设备配置无效\n", filename, i + 1);
             continue;
         }
 
@@ -443,49 +446,49 @@ static void parse_cloud_content(collector_ctx_t *ctx, cJSON *root, const char *f
         cJSON *node_list = cJSON_GetObjectItem(device, "node_list");
 
         if (!cJSON_IsString(slave_name)) {
-            printf("[Collector] 文件 %s 第 %d 个设备缺少有效的 slave_name\n", filename, i + 1);
+            HLK_LOG_ERR("[Collector] 文件 %s 第 %d 个设备缺少有效的 slave_name\n", filename, i + 1);
             skipped_devices++;
             continue;
         }
 
         if (!cJSON_IsArray(node_list)) {
-            printf("[Collector] 文件 %s 设备 %s 的 node_list 不是数组类型\n", filename, slave_name->valuestring);
+            HLK_LOG_ERR("[Collector] 文件 %s 设备 %s 的 node_list 不是数组类型\n", filename, slave_name->valuestring);
             skipped_devices++;
             continue;
         }
 
         const char *dev_name = slave_name->valuestring;
         int pt_count = cJSON_GetArraySize(node_list);
-        printf("[Collector] 处理设备 %s，包含 %d 个点位\n", dev_name, pt_count);
+        HLK_LOG_INFO("[Collector] 处理设备 %s，包含 %d 个点位\n", dev_name, pt_count);
 
         int device_added = 0;
         for (int j = 0; j < pt_count; j++) {
             cJSON *pt = cJSON_GetArrayItem(node_list, j);
             if (!cJSON_IsString(pt)) {
-                printf("[Collector] 设备 %s 的第 %d 个点位不是字符串类型\n", dev_name, j + 1);
+                HLK_LOG_ERR("[Collector] 设备 %s 的第 %d 个点位不是字符串类型\n", dev_name, j + 1);
                 skipped_points++;
                 continue;
             }
 
-            printf("[Collector] 添加点位: 设备=%s, 点位=%s\n", dev_name, pt->valuestring);
+            HLK_LOG_INFO("[Collector] 添加点位: 设备=%s, 点位=%s\n", dev_name, pt->valuestring);
             add_target_point(ctx, dev_name, pt->valuestring);
             added++;
             device_added++;
         }
 
         if (device_added > 0) {
-            printf("[Collector] 设备 %s 添加了 %d 个点位\n", dev_name, device_added);
+            HLK_LOG_INFO("[Collector] 设备 %s 添加了 %d 个点位\n", dev_name, device_added);
         }
     }
 
-    printf("[Collector] 文件 %s 解析完成: 总共添加 %d 个点位，跳过 %d 个设备，%d 个点位\n",
+    HLK_LOG_INFO("[Collector] 文件 %s 解析完成: 总共添加 %d 个点位，跳过 %d 个设备，%d 个点位\n",
            filename, added, skipped_devices, skipped_points);
 }
 
 // 解析Cloud上报配置参数
 static void parse_cloud_report_config(collector_ctx_t *ctx, cJSON *root, const char *filename)
 {
-    printf("[Collector] 开始解析Cloud上报配置参数: 文件 %s\n", filename);
+    HLK_LOG_INFO("[Collector] 开始解析Cloud上报配置参数: 文件 %s\n", filename);
 
     cloud_report_config_t *config = &ctx->report_config;
 
@@ -493,35 +496,35 @@ static void parse_cloud_report_config(collector_ctx_t *ctx, cJSON *root, const c
     cJSON *change_report_type = cJSON_GetObjectItem(root, "change_report_type");
     if (change_report_type && cJSON_IsNumber(change_report_type)) {
         config->change_report_type = change_report_type->valueint;
-        printf("[Collector] change_report_type: %d\n", config->change_report_type);
+        HLK_LOG_INFO("[Collector] change_report_type: %d\n", config->change_report_type);
     }
 
     // 解析name字段
     cJSON *name = cJSON_GetObjectItem(root, "name");
     if (name && cJSON_IsString(name)) {
         strncpy(config->name, name->valuestring, sizeof(config->name) - 1);
-        printf("[Collector] name: %s\n", config->name);
+        HLK_LOG_INFO("[Collector] name: %s\n", config->name);
     }
 
     // 解析data_report_type字段
     cJSON *data_report_type = cJSON_GetObjectItem(root, "data_report_type");
     if (data_report_type && cJSON_IsNumber(data_report_type)) {
         config->data_report_type = data_report_type->valueint;
-        printf("[Collector] data_report_type: %d\n", config->data_report_type);
+        HLK_LOG_INFO("[Collector] data_report_type: %d\n", config->data_report_type);
     }
 
     // 解析err_enable字段
     cJSON *err_enable = cJSON_GetObjectItem(root, "err_enable");
     if (err_enable && cJSON_IsNumber(err_enable)) {
         config->err_enable = err_enable->valueint;
-        printf("[Collector] err_enable: %d\n", config->err_enable);
+        HLK_LOG_INFO("[Collector] err_enable: %d\n", config->err_enable);
     }
 
     // 解析err_info字段
     cJSON *err_info = cJSON_GetObjectItem(root, "err_info");
     if (err_info && cJSON_IsString(err_info)) {
         strncpy(config->err_info, err_info->valuestring, sizeof(config->err_info) - 1);
-        printf("[Collector] err_info: %s\n", config->err_info);
+        HLK_LOG_INFO("[Collector] err_info: %s\n", config->err_info);
     }
 
     // 解析cond字段 (上报条件)
@@ -531,7 +534,7 @@ static void parse_cloud_report_config(collector_ctx_t *ctx, cJSON *root, const c
         cJSON *period = cJSON_GetObjectItem(cond, "period");
         if (period && cJSON_IsNumber(period)) {
             config->cond.period = period->valueint;
-            printf("[Collector] cond.period: %d\n", config->cond.period);
+            HLK_LOG_INFO("[Collector] cond.period: %d\n", config->cond.period);
         }
 
         // 解析timed字段
@@ -540,37 +543,37 @@ static void parse_cloud_report_config(collector_ctx_t *ctx, cJSON *root, const c
             cJSON *type = cJSON_GetObjectItem(timed, "type");
             if (type && cJSON_IsNumber(type)) {
                 config->cond.timed.type = type->valueint;
-                printf("[Collector] cond.timed.type: %d\n", config->cond.timed.type);
+                HLK_LOG_INFO("[Collector] cond.timed.type: %d\n", config->cond.timed.type);
             }
 
             cJSON *hh = cJSON_GetObjectItem(timed, "hh");
             if (hh && cJSON_IsNumber(hh)) {
                 config->cond.timed.hh = hh->valueint;
-                printf("[Collector] cond.timed.hh: %d\n", config->cond.timed.hh);
+                HLK_LOG_INFO("[Collector] cond.timed.hh: %d\n", config->cond.timed.hh);
             }
 
             cJSON *mm = cJSON_GetObjectItem(timed, "mm");
             if (mm && cJSON_IsNumber(mm)) {
                 config->cond.timed.mm = mm->valueint;
-                printf("[Collector] cond.timed.mm: %d\n", config->cond.timed.mm);
+                HLK_LOG_INFO("[Collector] cond.timed.mm: %d\n", config->cond.timed.mm);
             }
         }
     }
 
-    printf("[Collector] Cloud上报配置参数解析完成: 文件 %s\n", filename);
+    HLK_LOG_INFO("[Collector] Cloud上报配置参数解析完成: 文件 %s\n", filename);
 }
 
 // 处理单个配置文件
 static void process_config_file(collector_ctx_t *ctx, const char *full_path, const char *filename)
 {
-    printf("[Collector] 开始处理配置文件: %s (路径: %s)\n", filename, full_path);
+    HLK_LOG_INFO("[Collector] 开始处理配置文件: %s (路径: %s)\n", filename, full_path);
 
     FILE *fp = fopen(full_path, "r");
     if (!fp) {
         fprintf(stderr, "[Collector] 无法打开配置文件 %s: %s\n", filename, strerror(errno));
         return;
     }
-    printf("[Collector] 成功打开配置文件 %s\n", filename);
+    HLK_LOG_INFO("[Collector] 成功打开配置文件 %s\n", filename);
 
     // 获取文件大小
     if (fseek(fp, 0, SEEK_END) != 0) {
@@ -586,7 +589,7 @@ static void process_config_file(collector_ctx_t *ctx, const char *full_path, con
         return;
     }
 
-    printf("[Collector] 配置文件 %s 大小: %ld 字节\n", filename, len);
+    HLK_LOG_INFO("[Collector] 配置文件 %s 大小: %ld 字节\n", filename, len);
 
     if (fseek(fp, 0, SEEK_SET) != 0) {
         fprintf(stderr, "[Collector] 无法重置文件指针 %s: %s\n", filename, strerror(errno));
@@ -634,12 +637,12 @@ static void process_config_file(collector_ctx_t *ctx, const char *full_path, con
 
     // 关键逻辑：只处理 Cloud 模式
     if ((strcmp(link->valuestring, "Cloud") == 0) || (strcmp(link->valuestring, "CLOUD") == 0)) {
-        printf("[Collector] 检测到Cloud模式，开始解析点位配置 %s\n", filename);
+        HLK_LOG_INFO("[Collector] 检测到Cloud模式，开始解析点位配置 %s\n", filename);
         parse_cloud_content(ctx, json, filename);
         // 解析Cloud上报配置参数
         parse_cloud_report_config(ctx, json, filename);
     } else {
-        printf("[Collector] 跳过非Cloud模式配置文件 %s (模式: %s)\n", filename, link->valuestring);
+        HLK_LOG_INFO("[Collector] 跳过非Cloud模式配置文件 %s (模式: %s)\n", filename, link->valuestring);
     }
     
 
@@ -649,7 +652,7 @@ static void process_config_file(collector_ctx_t *ctx, const char *full_path, con
 // 映射共享内存索引
 static int map_shm(collector_ctx_t *ctx) 
 {
-    printf("[Collector] 调用 Zig 接口映射共享内存...\n");
+    HLK_LOG_INFO("[Collector] 调用 Zig 接口映射共享内存...\n");
     
     ZigShmResult result;
     // 显式指定完整路径，这比依赖 shm_open 的环境配置更可靠
@@ -659,7 +662,7 @@ static int map_shm(collector_ctx_t *ctx)
     zig_map_modbus_shm(shm_path, &result);
 
     if (!result.success) {
-        printf("[Collector] Zig 映射失败!\n");
+        HLK_LOG_ERR("[Collector] Zig 映射失败!\n");
         return -1;
     }
 
@@ -668,11 +671,24 @@ static int map_shm(collector_ctx_t *ctx)
     ctx->shm_ptr = result.ptr;
     ctx->shm_size = result.size;
 
-    printf("[Collector] Zig 映射成功! Addr=%p, Size=%zu\n", ctx->shm_ptr, ctx->shm_size);
 
     // 这里的逻辑保持不变：遍历所有收集到的点位，去 SHM 索引表中查找下标
     modbus_shm_t *shm = (modbus_shm_t *)ctx->shm_ptr;
     int matched = 0;
+    HLK_LOG_INFO("[Collector] Zig 映射成功! Addr=%p, Size=%zu, index_entry_count=%d\n", ctx->shm_ptr, ctx->shm_size, shm->index_entry_count);
+
+    {
+        int iii;
+        for (iii = 0; iii < ctx->target_count; iii++) {
+            target_point_t *target = &ctx->targets[iii];
+            HLK_LOG_INFO("[Collector] target[%d] = %s.%s\n", iii, target->device_name, target->point_name);
+        }
+
+        for (iii = 0; iii < shm->index_entry_count; iii++) {
+            modbus_index_entry_t *entry = &shm->index_table[iii];
+            HLK_LOG_INFO("[Collector] index_table[%d] = %s.%s, absolute_index=%d\n", iii, entry->device_name, entry->point_name, entry->absolute_index);
+        }
+    }
 
     for (int i = 0; i < ctx->target_count; i++) {
         target_point_t *target = &ctx->targets[i];
@@ -681,13 +697,18 @@ static int map_shm(collector_ctx_t *ctx)
             modbus_index_entry_t *entry = &shm->index_table[k];
             if (strcmp(target->device_name, entry->device_name) == 0 &&
                 strcmp(target->point_name, entry->point_name) == 0) {
+                HLK_LOG_INFO("[Collector] 找到点位 %s.%s, absolute_index=%d\n", target->device_name, target->point_name, entry->absolute_index);
                 target->shm_absolute_index = entry->absolute_index;
+                target->decimal_places = entry->decimal_places;
+                target->value_type = entry->value_type;
                 matched++;
                 break;
             }
         }
     }
-    printf("[Collector] Total mapped points: %d/%d\n", matched, ctx->target_count);
+
+    HLK_LOG_INFO("[Collector] Total mapped points: %d/%d\n", matched, ctx->target_count);
+
     return 0;
 }
 
@@ -696,7 +717,7 @@ static int map_shm(collector_ctx_t *ctx)
 collector_ctx_t* collector_init(void) 
 {
     char *config_dir = "/etc/config/device/edge_report/";
-    printf("[Collector] Scanning config dir: %s\n", config_dir);
+    HLK_LOG_INFO("[Collector] Scanning config dir: %s\n", config_dir);
     
     collector_ctx_t *ctx = calloc(1, sizeof(collector_ctx_t));
     if (!ctx) return NULL;
@@ -724,7 +745,7 @@ collector_ctx_t* collector_init(void)
     closedir(dir);
 
     if (ctx->target_count == 0) {
-        printf("[Collector] No Cloud points found in any config files.\n");
+        HLK_LOG_ERR("[Collector] No Cloud points found in any config files.\n");
         return ctx;
     }
 
@@ -741,7 +762,7 @@ static int try_remap_shm(collector_ctx_t *ctx)
 {
     // 1. 先清理旧的（如果有）
     if (ctx->shm_ptr && ctx->shm_ptr != MAP_FAILED) {
-        printf("[Collector] 清理旧的映射...\n");
+        HLK_LOG_INFO("[Collector] 清理旧的映射...\n");
         zig_unmap_modbus_shm(ctx->shm_ptr, ctx->shm_size, ctx->shm_fd);
         ctx->shm_ptr = NULL;
         ctx->shm_fd = -1;
@@ -753,9 +774,9 @@ static int try_remap_shm(collector_ctx_t *ctx)
     // 注意：这里需要稍微修改一下 map_shm，让它不要重复做点位匹配，或者接受重连标志
     // 为了简单，我们这里直接调用 map_shm，它会更新 fd 和 ptr
     
-    printf("[Collector] 尝试重新建立映射...\n");
+    HLK_LOG_INFO("[Collector] 尝试重新建立映射...\n");
     if (map_shm(ctx) == 0) {
-        printf("[Collector] 重连成功！\n");
+        HLK_LOG_INFO("[Collector] 重连成功！\n");
         ctx->is_connected = 1;
         ctx->last_change_time = zig_get_timestamp();
         
@@ -778,13 +799,13 @@ void collector_sync_data(collector_ctx_t *ctx)
     // ==========================================
     // 阶段 1: 连接状态检查与恢复
     // ==========================================
-    if (ctx->is_connected == 0) {
+    if (ctx->is_connected == 0) {   //是否连接
         // 如果当前未连接，尝试连接
         if (try_remap_shm(ctx) != 0) {
             // 连接失败（可能采集进程还没启动），直接返回，下次再试
             // 可以打印个日志，但不要刷屏
             // printf("[Collector] 等待采集进程启动...\n"); 
-            return; 
+            return;
         }
     }
 
@@ -793,7 +814,7 @@ void collector_sync_data(collector_ctx_t *ctx)
     // ==========================================
     // 检查文件是否被删除重建了
     if (!zig_check_shm_inode(ctx->shm_fd, shm_path)) {
-        printf("[Collector] 警告：共享内存文件失效 (Inode 变更或文件丢失)，触发重连...\n");
+        HLK_LOG_WARN("[Collector] 警告：共享内存文件失效 (Inode 变更或文件丢失)，触发重连...\n");
         ctx->is_connected = 0; // 标记为断开
         return; // 本次跳过，下次循环会进入阶段1重连
     }
@@ -802,8 +823,8 @@ void collector_sync_data(collector_ctx_t *ctx)
     
     // 心跳没变：检查是否超时 (例如超过 5 秒没更新)
     if (zig_time_diff_abs(now, shm->last_update_time) > 5) {
-        printf("[Collector] 警告：共享内存数据僵死 (心跳未更新 > 5s)，采集进程可能已挂起。\n");
-        printf("[Collector] now: %lld, shm->last_update_time: %d\n", now, shm->last_update_time);
+        HLK_LOG_WARN("[Collector] 警告：共享内存数据僵死 (心跳未更新 > 5s)，采集进程可能已挂起。\n");
+        HLK_LOG_INFO("[Collector] now: %lld, shm->last_update_time: %d\n", now, shm->last_update_time);
     }
 
     // ==========================================
@@ -814,7 +835,7 @@ void collector_sync_data(collector_ctx_t *ctx)
     for (int i = 0; i < ctx->target_count; i++) {
         if (ctx->targets[i].shm_absolute_index >= 0) {
             ctx->targets[i].current_value = shm->data[ctx->targets[i].shm_absolute_index];
-            printf("[Collector] %s.%s = %f\n", ctx->targets[i].device_name, ctx->targets[i].point_name, ctx->targets[i].current_value);
+            HLK_LOG_INFO("[Collector] %s.%s = %f\n", ctx->targets[i].device_name, ctx->targets[i].point_name, ctx->targets[i].current_value);
         }
     }
 }
@@ -840,11 +861,11 @@ static int should_report_data(collector_ctx_t *ctx)
         static time_t last_period_report = 0;
         if (now - last_period_report >= config->cond.period) {
             last_period_report = now;
-            printf("[Collector] last_period_report: %lld\n", last_period_report);
+            HLK_LOG_INFO("[Collector] last_period_report: %lld\n", last_period_report);
             return 1;
         }
     }
-    //printf("[Collector] config->cond.period: %d\n", config->cond.period);
+    //HLK_LOG_INFO("[Collector] config->cond.period: %d\n", config->cond.period);
 
     // 检查定时上报
     if (config->cond.timed.type != 0) {
@@ -881,15 +902,15 @@ static int should_report_data(collector_ctx_t *ctx)
 // 准备上报数据（URL编码格式）
 static char* prepare_report_data_urlencoded(collector_ctx_t *ctx)
 {
-    printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 开始准备上报数据\n");
+    HLK_LOG_INFO("[DATA_COLLECTOR] 开始准备上报数据\n");
 
     if (!ctx || !ctx->targets || ctx->target_count <= 0) {
-        printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 参数无效 - ctx=%p, targets=%p, count=%d\n",
+        HLK_LOG_INFO("[DATA_COLLECTOR] 参数无效 - ctx=%p, targets=%p, count=%d\n",
                ctx, ctx ? ctx->targets : NULL, ctx ? ctx->target_count : 0);
         return NULL;
     }
 
-    printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 配置名称=%s, 目标点位数量=%d\n",
+    HLK_LOG_INFO("[DATA_COLLECTOR] 配置名称=%s, 目标点位数量=%d\n",
            ctx->report_config.name, ctx->target_count);
 
     // 估算字符串长度：时间戳(25) + 每个点位的空间(设备名50 + 点位名50 + 数值25 + 分隔符5) * 点位数
@@ -899,12 +920,12 @@ static char* prepare_report_data_urlencoded(collector_ctx_t *ctx)
         estimated_len += 50 + 50 + 25 + 5; // DN=设备名&点位名=数值&
     }
 
-    printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 预估字符串长度=%zu\n", estimated_len);
+    HLK_LOG_INFO("[DATA_COLLECTOR] 预估字符串长度=%zu\n", estimated_len);
 
     // 分配内存
     char *result = (char*)malloc(estimated_len);
     if (!result) {
-        printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 内存分配失败\n");
+        HLK_LOG_INFO("[DATA_COLLECTOR] 内存分配失败\n");
         return NULL;
     }
 
@@ -918,7 +939,7 @@ static char* prepare_report_data_urlencoded(collector_ctx_t *ctx)
     snprintf(time_str, sizeof(time_str), "time=%lld&", now);
     strncat(result, time_str, estimated_len - current_len - 1);
     current_len = strlen(result);
-    printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 添加时间戳 time=%lld\n", now);
+    HLK_LOG_INFO("[DATA_COLLECTOR] 添加时间戳 time=%lld\n", now);
 
     // 用于跟踪当前设备
     char current_device[50] = "";
@@ -927,6 +948,7 @@ static char* prepare_report_data_urlencoded(collector_ctx_t *ctx)
     for (int i = 0; i < ctx->target_count; i++) {
         target_point_t *target = &ctx->targets[i];
 
+        #if 0   //更新上报格式 去掉DeviceName 直接上报点位数据 (数据点名称唯一)
         // 检查是否是新设备
         if (strcmp(current_device, target->device_name) != 0) {
             // 添加设备标识符
@@ -939,17 +961,22 @@ static char* prepare_report_data_urlencoded(collector_ctx_t *ctx)
             strncpy(current_device, target->device_name, sizeof(current_device) - 1);
             current_device[sizeof(current_device) - 1] = '\0';
 
-            printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 切换到新设备 %s\n", target->device_name);
+            HLK_LOG_INFO("[DATA_COLLECTOR] 切换到新设备 %s\n", target->device_name);
         }
+        #endif
 
-        // 添加点位数据（保留6位小数）
+        // 添加点位数据（小数位数由 decimal_places 决定）
         char point_str[85]; // 点位名 + = + 数值 + &
-        snprintf(point_str, sizeof(point_str), "%s=%.6f&", target->point_name, target->current_value);
+        if (target->value_type == FLOAT_ABCD || target->value_type == FLOAT_CDAB || target->value_type == FLOAT_DCBA) {
+            snprintf(point_str, sizeof(point_str), "%s=%.*f&", target->point_name, (int)target->decimal_places, target->current_value);
+        } else {
+            snprintf(point_str, sizeof(point_str), "%s=%.0f&", target->point_name, target->current_value);
+        }
         strncat(result, point_str, estimated_len - current_len - 1);
         current_len = strlen(result);
 
-        printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 添加点位 %s=%.6f\n",
-               target->point_name, target->current_value);
+        HLK_LOG_INFO("[DATA_COLLECTOR] 添加点位 %s=%.*f\n",
+               target->point_name, (int)target->decimal_places, target->current_value);
     }
 
     // 移除最后一个&符号
@@ -958,15 +985,15 @@ static char* prepare_report_data_urlencoded(collector_ctx_t *ctx)
         current_len--;
     }
 
-    printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 数据准备完成，最终长度=%zu\n", current_len);
-    printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 结果: %s\n", result);
+    HLK_LOG_INFO("[DATA_COLLECTOR] 数据准备完成，最终长度=%zu\n", current_len);
+    HLK_LOG_INFO("[DATA_COLLECTOR] 结果: %s\n", result);
 
     // 构建JSON格式数据
     cJSON *root = cJSON_CreateObject();
     char *response_str = NULL;
 
     if (!root) {
-        printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 创建JSON根对象失败\n");
+        HLK_LOG_INFO("[DATA_COLLECTOR] 创建JSON根对象失败\n");
         free(result);
         return NULL;
     }
@@ -977,7 +1004,7 @@ static char* prepare_report_data_urlencoded(collector_ctx_t *ctx)
     // 创建Items数组
     cJSON *items_array = cJSON_CreateArray();
     if (!items_array) {
-        printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 创建Items数组失败\n");
+        HLK_LOG_INFO("[DATA_COLLECTOR] 创建Items数组失败\n");
         cJSON_Delete(root);
         free(result);
         return NULL;
@@ -986,7 +1013,7 @@ static char* prepare_report_data_urlencoded(collector_ctx_t *ctx)
     // 创建单个Item对象
     cJSON *item = cJSON_CreateObject();
     if (!item) {
-        printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 创建Item对象失败\n");
+        HLK_LOG_INFO("[DATA_COLLECTOR] 创建Item对象失败\n");
         cJSON_Delete(items_array);
         cJSON_Delete(root);
         free(result);
@@ -1011,7 +1038,7 @@ static char* prepare_report_data_urlencoded(collector_ctx_t *ctx)
     // 生成JSON字符串
     response_str = cJSON_PrintUnformatted(root);
     if (!response_str) {
-        printf("[DATA_COLLECTOR] prepare_report_data_urlencoded: 生成JSON字符串失败\n");
+        HLK_LOG_INFO("[DATA_COLLECTOR] 生成JSON字符串失败\n");
         cJSON_Delete(root);
         free(result);
         return NULL;
@@ -1028,7 +1055,7 @@ static char* prepare_report_data_urlencoded(collector_ctx_t *ctx)
 // 准备上报数据（JSON格式）- 保留原有函数用于兼容性
 static char* prepare_report_data(collector_ctx_t *ctx)
 {
-    printf("[DATA_COLLECTOR] prepare_report_data: 开始准备上报数据\n");
+    HLK_LOG_INFO("[DATA_COLLECTOR] prepare_report_data: 开始准备上报数据\n");
     //上报数据格式
     /*
     上报数据格式：DN=DeviceName1&node0101=123&node2=xxx&node3=xxx&DN=xx&node1=xxx&node2=xxx
@@ -1044,7 +1071,7 @@ static char* prepare_report_data(collector_ctx_t *ctx)
 int collector_report_data(collector_ctx_t *ctx)
 {
     if (!ctx) {
-        printf("[Collector] Report error: invalid context\n");
+        HLK_LOG_ERR("[Collector] Report error: invalid context\n");
         return -1;
     }
 
@@ -1053,7 +1080,7 @@ int collector_report_data(collector_ctx_t *ctx)
         //printf("[Collector] Skip report: conditions not met\n");
         return 0;
     }
-    printf("[Collector] should_report_data: 1\n");
+    HLK_LOG_INFO("[Collector] should_report_data: 1\n");
     collector_sync_data(ctx);
 
     // ==========================================
@@ -1061,10 +1088,10 @@ int collector_report_data(collector_ctx_t *ctx)
     // ==========================================
     char *report_data = prepare_report_data_urlencoded(ctx);
     if (!report_data) {
-        printf("[Collector] Report error: failed to prepare data\n");
+        HLK_LOG_ERR("[Collector] Report error: failed to prepare data\n");
         return -1;
     }
-    printf("[Collector] Report data: %s\n", report_data);
+    HLK_LOG_INFO("[Collector] Report data: %s\n", report_data);
 
     int realtime_send_success = 0;
 
@@ -1074,18 +1101,18 @@ int collector_report_data(collector_ctx_t *ctx)
     if (sharedData.connect_status == MQTT_CONNECT_STATUS_CONNECTED) {
 
         
-        printf("[Collector] MQTT connected, attempting to send realtime data...\n");
+        HLK_LOG_INFO("[Collector] MQTT connected, attempting to send realtime data...\n");
         #if 1
         int rc = hlk_mqtt_publish(mqtt_topic_type_table[TOPIC_POST].topic, QOS0, report_data, strlen(report_data));
         if (rc == 0) {
-            printf("[Collector] Realtime data sent successfully\n");
+            HLK_LOG_INFO("[Collector] Realtime data sent successfully\n");
             realtime_send_success = 1;
         } else {
-            printf("[Collector] Failed to send realtime data (rc=%d)\n", rc);
+            HLK_LOG_ERR("[Collector] Failed to send realtime data (rc=%d)\n", rc);
         }
         #endif
     } else {
-        printf("[Collector] MQTT not connected (status=%d), skipping realtime send\n",
+        HLK_LOG_ERR("[Collector] MQTT not connected (status=%d), skipping realtime send\n",
                sharedData.connect_status);
     }
 
@@ -1093,10 +1120,10 @@ int collector_report_data(collector_ctx_t *ctx)
     // 步骤 C：处理缓存（仅在实时发送成功后执行）
     // ==========================================
     if (realtime_send_success) {
-        printf("[Collector] Processing cache data...\n");
+        HLK_LOG_INFO("[Collector] Processing cache data...\n");
         //flush_one_cache_file();
     } else {
-        printf("[Collector] Skipping cache processing (realtime send failed)\n");
+        HLK_LOG_ERR("[Collector] Skipping cache processing (realtime send failed)\n");
     }
 
     #if 0
@@ -1136,20 +1163,9 @@ void collector_destroy(collector_ctx_t *ctx)
 /******************************************************************************
  * 函数名    : hlk_mqtt_handle_data_points_down
  ******************************************************************************/
- void hlk_mqtt_handle_data_points_down(MessageData *pdata)
+ void hlk_mqtt_handle_data_points_down(cJSON *root)
  {
-     int len;
-     char *str = NULL;
-     
-     // 获取消息长度和内容
-     len = pdata->message->payloadlen;
-     str = pdata->message->payload;
-          
-     //解析这个json 把InputData中的Name和Value提取出来
-     cJSON *root = cJSON_Parse(str);
-     if (root == NULL) {
-         return;
-     }
-
-     cJSON_Delete(root);
+    //采集或者设置
+    //数据格式：{"Name":"DataPointsDown","Value":"Device1_state=","Address":"中国–广东–深圳 电信"},"StartTime":"","Expire":"","DeviceCode":"eZ71cXD5Mla","TraceId":"00-ac129b101775871038815c95de1d23-ac12520918b3c8c6-01","Type":null}
+    
  }

@@ -5,12 +5,39 @@
 #include <stdint.h>
 #include <time.h>
 
+// 数据类型枚举
+typedef enum {
+    //BIT = 1,           // 位数据（别名）
+    UNSIGNED_16 = 1,       // 无符号整数（别名）
+    SIGNED_16 = 2,         // 有符号整数（别名）
+    BCD_16 = 3,             //16位 BCD
+    INT32_ABCD = 4,          // 32位有符号整数（AB CD）- Big Endian
+    INT32_CDAB = 5,     // 32位有符号整数（CD AB）- Little Endian
+    INT32_DCBA = 6,     // 32位 有符号(DC BA)
+    UINT32_ABCD = 7,         // 32位无符号整数（AB CD）- Big Endian
+    UINT32_CDAB = 8,    // 32位无符号整数（CD AB）- Little Endian
+    UINT32_DCBA = 9,    // 32位 无符号(DC BA)
+    FLOAT_ABCD = 10,    // 浮点数（AB CD）- Big Endian
+    FLOAT_CDAB = 11,    // 浮点数（CD AB）- Little Endian
+    FLOAT_DCBA = 12,    // 32位 浮点数(DC BA)
+    BCD_32     = 13,    // 32位 BCD
+    FLOAT_64_ABCD = 14, // 64位 浮点数(AB CD)
+    FLOAT_64_CDAB = 15, // 64位 浮点数(CD AB)
+    TM_32 = 16,         // 32位 时间戳
+    BTYE_30 = 17,        // 30字节 定位型
+    BIT = 18,           // 布尔值
+    STRING = 12,        // 字符串
+} value_type_t;
+
+
 
 // ... 结构体定义保持不变 ...
 typedef struct {
     char device_name[50];
     char point_name[50];
     int  shm_absolute_index; 
+    unsigned char decimal_places;            // 小数位数
+    unsigned char value_type;                // 数值类型
     double current_value;
 } target_point_t;
 
@@ -82,7 +109,5 @@ void collector_sync_data(collector_ctx_t *ctx);
 int collector_report_data(collector_ctx_t *ctx);
 
 void collector_destroy(collector_ctx_t *ctx);
-
-int collector_report_data(collector_ctx_t *ctx);
 
 #endif

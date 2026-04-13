@@ -10,6 +10,7 @@
 #include <math.h>
 #include <sys/time.h>
 #include <sys/select.h>
+#include "hlk_log.h"
 
 // ============================================================================
 // Musl 1.2+ compatibility: Forward declarations for __*time64 symbols
@@ -289,7 +290,7 @@ int get_device_credentials(ALINKDEV_t *dev)
                            dev->productSecret, dev->deviceSecret, 64);
 
     if(ret != 0){
-        printf("cfmGetLicense failed!\n");
+        HLK_LOG_ERR("cfmGetLicense failed!\n");
         return -1;
     }
 
@@ -324,7 +325,7 @@ int fota_Upgrade_Writing(void)
     filestru.ulFirmwareSize = g_ota_size;     // 固件文件大小
     filestru.ucReboot = 0;                    // 升级后是否重启
     
-    PRF("aucFirmwareName=%s,ulFirmwareSize=%d\r\n", filestru.aucFirmwareName, filestru.ulFirmwareSize);
+    HLK_LOG_INFO("aucFirmwareName=%s,ulFirmwareSize=%d\r\n", filestru.aucFirmwareName, filestru.ulFirmwareSize);
     
     // 调用系统固件升级API
     ret = igdCmFirmwareUpgradeApi((unsigned char *)&filestru, sizeof(filestru));
@@ -366,7 +367,7 @@ int get_mqtt_user_certification_h()
     
     if(ret != 0){
         // 获取五元组信息失败
-        PRF("cfmGetLicense failed!\r\n");
+        HLK_LOG_ERR("cfmGetLicense failed!\r\n");
         return -1;
     }
 
@@ -378,11 +379,11 @@ int get_mqtt_user_certification_h()
     strcpy(mqtt_user_cert.deviceSecret, deviceSecret);
 
     // 打印认证信息用于调试
-    PRF("projectID: %s\n", mqtt_user_cert.projectID);    
-    PRF("productKey: %s\n", mqtt_user_cert.productKey);    
-    PRF("productSecret: %s\n", mqtt_user_cert.productSecret);    
-    PRF("deviceName: %s\n", mqtt_user_cert.deviceName);    
-    PRF("deviceSecret: %s\n", mqtt_user_cert.deviceSecret);   
+    HLK_LOG_INFO("projectID: %s\n", mqtt_user_cert.projectID);    
+    HLK_LOG_INFO("productKey: %s\n", mqtt_user_cert.productKey);    
+    HLK_LOG_INFO("productSecret: %s\n", mqtt_user_cert.productSecret);    
+    HLK_LOG_INFO("deviceName: %s\n", mqtt_user_cert.deviceName);    
+    HLK_LOG_INFO("deviceSecret: %s\n", mqtt_user_cert.deviceSecret);   
 
     return 0;
 }
@@ -509,7 +510,7 @@ int hlk_mqtt_ping(void)
     cJSON *root = NULL;
     root = cJSON_CreateObject();
     if(root == NULL){
-        printf("Failed to allocate memory for JSON object.");
+        HLK_LOG_ERR("Failed to allocate memory for JSON object.");
         return -1;
     }
 
@@ -555,7 +556,7 @@ int hlk_mqtt_ping(void)
     char *str = NULL;
     str = cJSON_PrintUnformatted(root);
     if(str == NULL){
-        printf("Failed to allocate memory for JSON formatted.");
+        HLK_LOG_ERR("Failed to allocate memory for JSON formatted.");
         return -1;
     }
     //PRF("#### %s\n", str);
@@ -563,9 +564,9 @@ int hlk_mqtt_ping(void)
     // 通过MQTT发布心跳包到指定主题
     ret = hlk_mqtt_publish(mqtt_topic_type_table[TOPIC_PING_POST].topic, QOS0, str, strlen(str));
     if (ret == SUCCESS) {
-        PRF("mqtt ping publish ok\r\n");
+        HLK_LOG_INFO("mqtt ping publish ok\r\n");
     } else {
-        PRF("mqtt ping publish fail[%d]\r\n", ret);
+        HLK_LOG_ERR("mqtt ping publish fail[%d]\r\n", ret);
     }
 
     // 释放JSON对象和字符串内存
@@ -600,11 +601,11 @@ void mqtt_topic_type_init()
             // 使用hlk_topic_make函数生成实际的主题字符串
             hlk_topic_make(mqtt_topic_type_table[topic_type].topic, 
                           mqtt_topic_type_table[topic_type].format);
-            PRF("mqtt_topic_type_table[%d].topic:%s\n", topic_type, 
+            HLK_LOG_INFO("mqtt_topic_type_table[%d].topic:%s\n", topic_type, 
                 mqtt_topic_type_table[topic_type].topic);
         }
         else{
-            PRF("mqtt_topic_type_table format is NULL!!!!\n");
+            HLK_LOG_ERR("mqtt_topic_type_table format is NULL!!!!\n");
         }
     }
 
@@ -622,7 +623,7 @@ void mqtt_topic_type_init()
  ******************************************************************************/
 void messageArrived(MessageData *data)
 {
-    PRF("messageArrived %d %.*s payloadlen %zu payload %.*s\n", 
+    HLK_LOG_INFO("messageArrived %d %.*s payloadlen %zu payload %.*s\n", 
         data->topicName->lenstring.len, 
         data->topicName->lenstring.len, data->topicName->lenstring.data, 
         data->message->payloadlen, 
@@ -651,18 +652,18 @@ static void hlk_mqtt_handle_app(MessageData *pdata)
     str = pdata->message->payload;
     
     // 打印接收到的APP消息内容（调试用）
-    PRF("%s\n", str);   
+    HLK_LOG_INFO("%s\n", str);   
     
     //解析这个json 把InputData中的Name和Value提取出来
     cJSON *root = cJSON_Parse(str);
     if (root == NULL) {
-        PRF("cJSON_Parse error\n");
+        HLK_LOG_ERR("cJSON_Parse error\n");
         return;
     }
 
     cJSON *inputData = cJSON_GetObjectItem(root, "InputData");
     if (!inputData) {
-        PRF("InputData not found\n");
+        HLK_LOG_ERR("InputData not found\n");
         cJSON_Delete(root);
         return;
     }
@@ -670,13 +671,22 @@ static void hlk_mqtt_handle_app(MessageData *pdata)
     //提取Name的值
     cJSON *nameObj = cJSON_GetObjectItem(inputData, "Name");
     if (!nameObj || !cJSON_IsString(nameObj)) {
-        PRF("Name not found or not string\n");
+        HLK_LOG_ERR("Name not found or not string\n");
         cJSON_Delete(root);
         return;
     }
     
     char *name = nameObj->valuestring;
-    PRF("Channel name: %s\n", name);
+    HLK_LOG_INFO("Channel name: %s\n", name);
+
+    //处理来自 DataPointsDown 的信息
+    if (strcmp(name, "DataPointsDown") == 0) {
+        //处理来自 DataPointsDown 的信息
+        //云端下发信息 有两种情况 一个是设置 一个是采集
+        hlk_mqtt_handle_data_points_down(root);
+        cJSON_Delete(root);
+        return;
+    }
 
     // 创建推送数据的JSON对象
     cJSON *pushData = cJSON_CreateObject();
@@ -723,7 +733,7 @@ static void hlk_mqtt_handle_app(MessageData *pdata)
     if (strcmp(name, "SSID") == 0 && cJSON_IsString(cJSON_GetObjectItem(inputData, "Value"))) {
         //设置WIFI的SSID
         char *value = cJSON_GetObjectItem(inputData, "Value")->valuestring;
-        PRF("name: %s, value: %s\n", name, value);
+        HLK_LOG_INFO("name: %s, value: %s\n", name, value);
         
         // 推送数据到SSE
         char *pushDataStr = cJSON_PrintUnformatted(pushData);
@@ -735,7 +745,7 @@ static void hlk_mqtt_handle_app(MessageData *pdata)
     } else if (strcmp(name, "Channel") == 0 && cJSON_IsNumber(cJSON_GetObjectItem(inputData, "Value"))) {
         //设置WIFI的信道
         int value = cJSON_GetObjectItem(inputData, "Value")->valueint;
-        PRF("name: %s, value: %d\n", name, value);
+        HLK_LOG_INFO("name: %s, value: %d\n", name, value);
         
         // 推送数据到SSE
         char *pushDataStr = cJSON_PrintUnformatted(pushData);
@@ -747,7 +757,7 @@ static void hlk_mqtt_handle_app(MessageData *pdata)
     } else if (strcmp(name, "TRANSDOWN") == 0 && cJSON_IsString(cJSON_GetObjectItem(inputData, "Value"))) {
         //设置透传下行
         char *value = cJSON_GetObjectItem(inputData, "Value")->valuestring;
-        PRF("name: %s, value: %s\n", name, value);
+        HLK_LOG_INFO("name: %s, value: %s\n", name, value);
         
         // 推送数据到SSE
         char *pushDataStr = cJSON_PrintUnformatted(pushData);
@@ -765,7 +775,7 @@ static void hlk_mqtt_handle_app(MessageData *pdata)
         //云端可以自定义通道名称，此处可以处理自定义通道名称的逻辑
         //通道数据类型不定 怎么转发到 透传中
 
-        PRF("value error\n");
+        HLK_LOG_ERR("value error\n");
         
         // 即使是未知类型，也推送到SSE
         char *pushDataStr = cJSON_PrintUnformatted(pushData);
@@ -792,7 +802,7 @@ static void hlk_mqtt_handle_set(MessageData *pdata)
 {
     // TODO: 实现云端设置消息的解析和处理逻辑
     // 例如：设备参数配置、工作模式切换等
-    PRF("hlk_mqtt_handle_set %d %.*s payloadlen %zu payload %.*s\n", 
+    HLK_LOG_INFO("hlk_mqtt_handle_set %d %.*s payloadlen %zu payload %.*s\n", 
         pdata->topicName->lenstring.len, 
         pdata->topicName->lenstring.len, pdata->topicName->lenstring.data, 
         pdata->message->payloadlen, 
@@ -827,7 +837,7 @@ void hlk_mqtt_reset_reply(int reset, int reply, long long msg_Id)
 {
     // 获取当前系统时间戳
     uint32_t __time = hlk_sntp_time_get();
-    printf("__time = %d\n", __time);
+    HLK_LOG_INFO("__time = %d\n", __time);
     
     // 创建JSON文档对象用于构建回复消息
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
@@ -843,7 +853,7 @@ void hlk_mqtt_reset_reply(int reset, int reply, long long msg_Id)
     
     // 将JSON对象转换为字符串
     char *str = yyjson_mut_write(doc, YYJSON_WRITE_NOFLAG, NULL);
-    PRF("%s\n", str);
+    HLK_LOG_INFO("%s\n", str);
     
     if (str){
         // 通过重置主题发布回复消息
@@ -869,43 +879,43 @@ static void hlk_mqtt_handle_reset(MessageData *data)
     char *str = data->message->payload;
     long long reset_msg_Id;
     
-    PRF("%s\n", str);
+    HLK_LOG_INFO("%s\n", str);
 
     // 解析接收到的JSON格式重置指令
     yyjson_doc *doc = yyjson_read(str, len, 0);
     if (!doc){
-        printf("Error parsing JSON\n");
+        HLK_LOG_ERR("Error parsing JSON\n");
         return;
     }
     
     // 获取JSON根对象
     yyjson_val *root = yyjson_doc_get_root(doc);
     if (!yyjson_is_obj(root)){
-        printf("Root is not an object\n");
+        HLK_LOG_ERR("Root is not an object\n");
         goto exit;
     }
     
     // 解析配置清除标志
     yyjson_val *configClean_val = yyjson_obj_get(root, "ConfigClean");
     if (configClean_val == NULL){
-        PRF("yyjson_obj_get ConfigClean error\n");
+        HLK_LOG_ERR("yyjson_obj_get ConfigClean error\n");
         goto exit;
     }
     
     // 解析设备重置标志
     yyjson_val *deviceReset_val = yyjson_obj_get(root, "DeviceReset");
     if (configClean_val == NULL){
-        PRF("yyjson_obj_get DeviceReset error\n");
+        HLK_LOG_ERR("yyjson_obj_get DeviceReset error\n");
         goto exit;
     }
     
     // 获取消息ID，用于回复确认
     yyjson_val *valueid = yyjson_obj_get(root, "Id");
     if (valueid == NULL || !yyjson_is_num(valueid)){
-        PRF("yyjson_obj_get Id error\n");
+        HLK_LOG_ERR("yyjson_obj_get Id error\n");
     }else{
         reset_msg_Id = yyjson_get_sint(valueid);
-        printf("reset_msg_Id %lld \r\n", reset_msg_Id);
+        HLK_LOG_INFO("reset_msg_Id %lld \r\n", reset_msg_Id);
     }
 
     // 声明重置回复函数
@@ -935,7 +945,7 @@ static void hlk_mqtt_handle_reset(MessageData *data)
         #if defined(HLK_PRODUCT_WR10) || defined(HLK_PRODUCT_7628)
         app_reboot();
         #elif defined (HLK_PRODUCT_RM50)
-        PRF("RM50 Upgrade ");
+        HLK_LOG_INFO("RM50 Upgrade ");
         #endif
     }
     
@@ -960,7 +970,7 @@ static void hlk_mqtt_handle_ping_reply(MessageData *data)
     // 获取心跳回复消息内容
     int len = data->message->payloadlen;
     char *str = data->message->payload;
-    PRF("%s\n", str);
+    HLK_LOG_INFO("%s\n", str);
     static int time_sync = 0;
 
     // 定义JSON解析相关变量
@@ -970,7 +980,7 @@ static void hlk_mqtt_handle_ping_reply(MessageData *data)
     root = cJSON_Parse(str);
     if (root == NULL)
     {
-        PRF("cJSON_Parse error\n");
+        HLK_LOG_ERR("cJSON_Parse error\n");
         goto exit;
     }
     
@@ -978,7 +988,7 @@ static void hlk_mqtt_handle_ping_reply(MessageData *data)
     flag = cJSON_GetObjectItem(root, "HasLimit");
     if (flag == NULL)
     {
-        PRF("cJSON_GetObjectItem HasLimit error\n");
+        HLK_LOG_ERR("cJSON_GetObjectItem HasLimit error\n");
         goto exit;
     }
     
@@ -986,7 +996,7 @@ static void hlk_mqtt_handle_ping_reply(MessageData *data)
     item = cJSON_GetObjectItem(root, "AlreadyMesCount");
     if (item == NULL)
     {
-        PRF("cJSON_GetObjectItem AlreadyMesCount error\n");
+        HLK_LOG_ERR("cJSON_GetObjectItem AlreadyMesCount error\n");
         goto exit;
     }
     
@@ -994,7 +1004,7 @@ static void hlk_mqtt_handle_ping_reply(MessageData *data)
     max_count = cJSON_GetObjectItem(root, "MesLimitMin");
     if (max_count == NULL)
     {
-        PRF("cJSON_GetObjectItem MesLimitMin error\n");
+        HLK_LOG_ERR("cJSON_GetObjectItem MesLimitMin error\n");
         goto exit;
     }
 
@@ -1004,7 +1014,7 @@ static void hlk_mqtt_handle_ping_reply(MessageData *data)
     server_time = cJSON_GetObjectItem(root, "ServerTime");
     if (server_time == NULL)
     {
-        PRF("cJSON_GetObjectItem ServerTime error\n");
+        HLK_LOG_ERR("cJSON_GetObjectItem ServerTime error\n");
         goto exit;
     }
     utc_time = server_time->valuedouble;
@@ -1042,12 +1052,12 @@ void parse_http_url(const char *url, char *host, int *port, char *path)
 {
     // 设置默认HTTP端口
     *port = 80;
-    printf("url = %s\n", url);
+    HLK_LOG_INFO("url = %s\n", url);
     
     // 查找协议分隔符 "://"
     const char *start = strstr(url, "://");
     if (start == NULL) {
-        printf("Invalid URL\n");
+        HLK_LOG_ERR("Invalid URL\n");
         return;
     }
 
@@ -1055,7 +1065,7 @@ void parse_http_url(const char *url, char *host, int *port, char *path)
     start += 3; // 跳过 "://"
     const char *end = strchr(start, '/');
     if (end == NULL) {
-        printf("Invalid URL\n");
+        HLK_LOG_ERR("Invalid URL\n");
         return;
     }
 
@@ -1089,12 +1099,12 @@ void parse_http_url(const char *url, char *host, int *port, char *path)
 size_t write_callback(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     size_t expected_bytes;
     size_t wirtten = 0;
-    PRF("write_callback size:%d, nmemb:%d\n", size, nmemb);
-    PRF("ptr:%s\n", ptr);
+    HLK_LOG_INFO("write_callback size:%d, nmemb:%d\n", size, nmemb);
+    HLK_LOG_INFO("ptr:%s\n", ptr);
 
     // 检查输入参数的有效性
     if (!ptr || !stream || size == 0 || nmemb == 0) {
-        PRF("write_callback: 无效的输入参数\n");
+        HLK_LOG_ERR("write_callback: 无效的输入参数\n");
         return 0;  // 返回0告知libcurl出现错误
     }
 
@@ -1113,16 +1123,16 @@ size_t write_callback(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     if (wirtten != expected_bytes) {
         // 写入失败或部分写入
         if (ferror(stream)) {
-            PRF("write_callback: 文件写入错误，可能原因：磁盘空间不足或I/O错误\n");
+            HLK_LOG_ERR("write_callback: 文件写入错误，可能原因：磁盘空间不足或I/O错误\n");
         } else if (feof(stream)) {
-            PRF("write_callback: 意外遇到文件结尾\n");
+            HLK_LOG_ERR("write_callback: 意外遇到文件结尾\n");
         } else {
-            PRF("write_callback: 部分写入，期望写入 %zu 项，实际写入 %zu 项\n", nmemb, wirtten);
+            HLK_LOG_ERR("write_callback: 部分写入，期望写入 %zu 项，实际写入 %zu 项\n", nmemb, wirtten);
         }
         
         // 强制刷新缓冲区，确保已写入的数据保存到磁盘
         if (fflush(stream) != 0) {
-            PRF("write_callback: 刷新文件缓冲区失败\n");
+            HLK_LOG_ERR("write_callback: 刷新文件缓冲区失败\n");
         }
         
         // 返回0告知libcurl出现错误，这会中断下载
@@ -1151,7 +1161,7 @@ int progress_callback(void *clientp, double dltotal, double dlnow, double ultota
 {
     if (dltotal > 0) {
         // 计算并打印下载进度百分比
-        printf("\r\n=================%.0f%%=================\r\n", dlnow / dltotal * 100);
+        HLK_LOG_INFO("\r\n=================%.0f%%=================\r\n", dlnow / dltotal * 100);
     }
     return 0;  // 返回0继续下载
 }
@@ -1253,7 +1263,7 @@ void consolidated_file_removes_checksum(FILE *targetFile)
     // 打开临时下载文件
     sourceFile = fopen(SYSUPGRADE_BIN_PATH_TMP, "rb");
     if (sourceFile == NULL) {
-        PRF("fopen %s fail\n", SYSUPGRADE_BIN_PATH_TMP);
+        HLK_LOG_ERR("fopen %s fail\n", SYSUPGRADE_BIN_PATH_TMP);
         return;
     }
 
@@ -1293,7 +1303,7 @@ int hlk_ota_write_version(const char *filename, const VersionInfo *info, int pro
     FILE *fp_;
     fp_ = fopen(filename, "wb");
     if (!fp_){
-        PRF("open %s failed! \r\n", filename);
+        HLK_LOG_ERR("open %s failed! \r\n", filename);
         return -1;
     }
     
@@ -1303,7 +1313,7 @@ int hlk_ota_write_version(const char *filename, const VersionInfo *info, int pro
     
     // 将版本信息写入文件
     int success = (fwrite(&tmp, sizeof(tmp), 1, fp_) == 1);
-    printf("write sucess\r\n");
+    HLK_LOG_INFO("write sucess\r\n");
     fclose(fp_);
     return success ? 0 : -1;
 }
@@ -1322,13 +1332,13 @@ int hlk_ota_read_version(const char *filename, VersionInfo *out)
     FILE *fp_ = fopen(filename, "rb");
     if (!fp_)
     {
-        PRF("open %s failed! \r\n", filename);
+        HLK_LOG_ERR("open %s failed! \r\n", filename);
         return -1;
     }
     
     // 读取版本信息结构体
     int success = (fread(out, sizeof(VersionInfo), 1, fp_) == 1);
-    printf("\r\n==Read== Version:%s\r\nmsgid:%d\r\n", out->version, out->msgid);
+    HLK_LOG_INFO("\r\n==Read== Version:%s\r\nmsgid:%d\r\n", out->version, out->msgid);
 
     fclose(fp_);
     return success ? 0 : -1;
@@ -1409,7 +1419,7 @@ void hlk_mqtt_report_version(int code, int step, int msg_id)
 
     // 将JSON对象转换为字符串
     char *str = cJSON_PrintUnformatted(root);
-    PRF("%s\n", str);
+    HLK_LOG_INFO("%s\n", str);
 
     // 释放JSON对象
     if(root)
@@ -1418,9 +1428,9 @@ void hlk_mqtt_report_version(int code, int step, int msg_id)
     // 通过MQTT发布升级状态消息到云端
     int ret = hlk_mqtt_publish(mqtt_topic_type_table[TOPIC_UPGRADE_REPLY].topic, QOS0, str, strlen(str));
     if(ret == SUCCESS){
-        PRF("mqtt upgrade version publish ok\n");
+        HLK_LOG_INFO("mqtt upgrade version publish ok\n");
     }else{
-        PRF("mqtt upgrade version publish fail\n");
+        HLK_LOG_ERR("mqtt upgrade version publish fail\n");
     }
     
     // 释放字符串内存
@@ -1445,12 +1455,12 @@ void hlk_ota_check_version(void)
     // 尝试读取缓存的版本升级信息
     if (hlk_ota_read_version(SYSUPGRADE_MSGID_PATH, &read_verinfo) < 0){
         // 读取文件失败或文件不存在，说明没有待处理的升级
-        PRF("Read %s err\r\n", SYSUPGRADE_MSGID_PATH);
+        HLK_LOG_ERR("Read %s err\r\n", SYSUPGRADE_MSGID_PATH);
     } else {
         // 文件存在，检查版本号和消息ID
         if (read_verinfo.msgid) {
             get_version_info(version_now); // 获取当前运行的版本号
-            PRF("version_now:%s\r\n read_verinfo:%s\r\n", version_now, read_verinfo.version);
+            HLK_LOG_INFO("version_now:%s\r\n read_verinfo:%s\r\n", version_now, read_verinfo.version);
 
             // 比较当前版本与升级目标版本
             if (strcmp(version_now, read_verinfo.version) == 0 && read_verinfo.progress == 1){
@@ -1489,7 +1499,7 @@ static void hlk_ota_http_child_process(char *server_name, char *path, int pipe_f
     char acUrl[1024] = {0}; 
     sprintf(acUrl, "http://%s%s", server_name, path);
     
-    PRF("Child process: acUrl:%s\n", acUrl);
+    HLK_LOG_INFO("Child process: acUrl:%s\n", acUrl);
 
     // 初始化libcurl全局环境
     curl_global_init(CURL_GLOBAL_DEFAULT);
@@ -1508,7 +1518,7 @@ static void hlk_ota_http_child_process(char *server_name, char *path, int pipe_f
         exit(1);
     }
 
-    PRF("Child process: start download==========>\r\n");
+    HLK_LOG_INFO("Child process: start download==========>\r\n");
     
     // 配置分段下载参数
     int segment_size = 4096*1024;  // 每段1M
@@ -1607,10 +1617,10 @@ static void hlk_ota_http_child_process(char *server_name, char *path, int pipe_f
 
         if (res != CURLE_OK) {
             siDownFailFlag++;
-            PRF("Child process: curl_easy_perform() failed: %d, %s\n", res, errbuf);
+            HLK_LOG_INFO("Child process: curl_easy_perform() failed: %d, %s\n", res, errbuf);
             
             if (siDownFailFlag <= 3) {
-                PRF("Child process: Retry %d/3\n", siDownFailFlag);
+                HLK_LOG_INFO("Child process: Retry %d/3\n", siDownFailFlag);
                 if (fp) {
                     fclose(fp);
                     fp = NULL;
@@ -1618,7 +1628,7 @@ static void hlk_ota_http_child_process(char *server_name, char *path, int pipe_f
                 sleep(1);  // 等待1秒后重试
                 goto re_download;
             } else {
-                PRF("Child process: Max retries reached\n");
+                HLK_LOG_ERR("Child process: Max retries reached\n");
                 result.result_code = res;
                 sprintf(result.error_msg, "Download failed after 3 retries: %s", errbuf);
                 write(pipe_fd, &result, sizeof(result));
@@ -1629,7 +1639,7 @@ static void hlk_ota_http_child_process(char *server_name, char *path, int pipe_f
                 break;
             }
         } else {
-            PRF("Child process: download segment success\n");
+            HLK_LOG_INFO("Child process: download segment success\n");
             g_curl_schedule = 0;
         }
 
@@ -1664,7 +1674,7 @@ end:
     }
     write(pipe_fd, &result, sizeof(result));
     
-    PRF("Child process: ===================>end\r\n");
+    HLK_LOG_INFO("Child process: ===================>end\r\n");
     exit(res == CURLE_OK ? 0 : 1);
 }
 
@@ -1689,11 +1699,11 @@ int hlk_ota_http(char *server_name, char *path)
     int select_result;
     time_t start_time, current_time;
 
-    PRF("Starting OTA download with child process\n");
+    HLK_LOG_INFO("Starting OTA download with child process\n");
     
     // 创建管道用于进程间通信
     if (pipe(pipe_fds) == -1) {
-        PRF("Failed to create pipe: %s\n", strerror(errno));
+        HLK_LOG_ERR("Failed to create pipe: %s\n", strerror(errno));
         return CURLE_FAILED_INIT;
     }
     
@@ -1703,7 +1713,7 @@ int hlk_ota_http(char *server_name, char *path)
     // 创建子进程
     child_pid = fork();
     if (child_pid == -1) {
-        PRF("Failed to fork child process: %s\n", strerror(errno));
+        HLK_LOG_ERR("Failed to fork child process: %s\n", strerror(errno));
         close(pipe_fds[0]);
         close(pipe_fds[1]);
         return CURLE_FAILED_INIT;
@@ -1718,7 +1728,7 @@ int hlk_ota_http(char *server_name, char *path)
         // 父进程：等待子进程结果
         close(pipe_fds[1]);  // 父进程不需要写端
         
-        PRF("Parent process: waiting for child process (PID: %d)\n", child_pid);
+        HLK_LOG_INFO("Parent process: waiting for child process (PID: %d)\n", child_pid);
         
         // 监听管道和子进程状态
         while (1) {
@@ -1726,7 +1736,7 @@ int hlk_ota_http(char *server_name, char *path)
             
             // 检查是否超时
             if (current_time - start_time > OTA_DOWNLOAD_TIMEOUT) {
-                PRF("OTA download timeout, killing child process\n");
+                HLK_LOG_ERR("OTA download timeout, killing child process\n");
                 kill(child_pid, SIGTERM);
                 sleep(2);
                 kill(child_pid, SIGKILL);
@@ -1747,7 +1757,7 @@ int hlk_ota_http(char *server_name, char *path)
                 // 有数据可读
                 ssize_t bytes_read = read(pipe_fds[0], &result, sizeof(result));
                 if (bytes_read > 0) {
-                    PRF("Received from child: code=%d, progress=%d%%, msg=%s\n", 
+                    HLK_LOG_INFO("Received from child: code=%d, progress=%d%%, msg=%s\n", 
                         result.result_code, result.download_progress, result.error_msg);
                     
                     // 如果是进度更新，向云端报告
@@ -1761,10 +1771,10 @@ int hlk_ota_http(char *server_name, char *path)
             int wait_result = waitpid(child_pid, &status, WNOHANG);
             if (wait_result == child_pid) {
                 // 子进程已结束
-                PRF("Child process finished with status: %d\n", status);
+                HLK_LOG_INFO("Child process finished with status: %d\n", status);
                 break;
             } else if (wait_result == -1) {
-                PRF("waitpid failed: %s\n", strerror(errno));
+                HLK_LOG_ERR("waitpid failed: %s\n", strerror(errno));
                 break;
             }
         }
@@ -1774,10 +1784,10 @@ int hlk_ota_http(char *server_name, char *path)
         // 根据子进程退出状态返回结果
         if (WIFEXITED(status)) {
             int exit_code = WEXITSTATUS(status);
-            PRF("Child process exited with code: %d\n", exit_code);
+            HLK_LOG_INFO("Child process exited with code: %d\n", exit_code);
             return (exit_code == 0) ? CURLE_OK : CURLE_HTTP_RETURNED_ERROR;
         } else if (WIFSIGNALED(status)) {
-            PRF("Child process killed by signal: %d\n", WTERMSIG(status));
+            HLK_LOG_ERR("Child process killed by signal: %d\n", WTERMSIG(status));
             return CURLE_ABORTED_BY_CALLBACK;
         }
     }
@@ -1815,7 +1825,7 @@ static void hlk_mqtt_handle_ota(MessageData *data)
     root = cJSON_Parse(str);
     if (root == NULL)
     {
-        PRF("cJSON_Parse error\n");
+        HLK_LOG_ERR("cJSON_Parse error\n");
         goto exit;
     }
     
@@ -1823,7 +1833,7 @@ static void hlk_mqtt_handle_ota(MessageData *data)
     version = cJSON_GetObjectItem(root, "Version");
     if (version == NULL)
     {
-        PRF("cJSON_GetObjectItem Version error\n");
+        HLK_LOG_ERR("cJSON_GetObjectItem Version error\n");
         goto exit;
     }
     strcpy(get_.version, version->valuestring);
@@ -1832,7 +1842,7 @@ static void hlk_mqtt_handle_ota(MessageData *data)
     source = cJSON_GetObjectItem(root, "Source");
     if (source == NULL)
     {
-        PRF("cJSON_GetObjectItem Source error\n");
+        HLK_LOG_ERR("cJSON_GetObjectItem Source error\n");
         goto exit;
     }
     
@@ -1840,7 +1850,7 @@ static void hlk_mqtt_handle_ota(MessageData *data)
     msgid = cJSON_GetObjectItem(root, "MsgId");
     if(msgid == NULL)
     {
-        PRF("cJSON_GetObjectItem MsgId error\n");
+        HLK_LOG_ERR("cJSON_GetObjectItem MsgId error\n");
         goto exit;
     }
     g_ota_msgid = msgid->valueint;  // 保存到全局变量
@@ -1850,7 +1860,7 @@ static void hlk_mqtt_handle_ota(MessageData *data)
     FId = cJSON_GetObjectItem(root, "FId");
     if(FId == NULL)
     {
-        PRF("cJSON_GetObjectItem FId error\n");
+        HLK_LOG_ERR("cJSON_GetObjectItem FId error\n");
         goto exit;
     }
     g_ota_fid = FId->valueint;  // 保存文件ID到全局变量
@@ -1862,7 +1872,7 @@ static void hlk_mqtt_handle_ota(MessageData *data)
     size = cJSON_GetObjectItem(root, "FileSize");
     if (size == NULL)
     {
-        PRF("cJSON_GetObjectItem FileSize error\n");
+        HLK_LOG_ERR("cJSON_GetObjectItem FileSize error\n");
         goto exit;
     }
     g_ota_size = size->valueint;  // 保存文件大小到全局变量
@@ -1871,17 +1881,17 @@ static void hlk_mqtt_handle_ota(MessageData *data)
     //hlk_ota_write_version(SYSUPGRADE_MSGID_PATH, &get_, 2);
     
     // 解析下载URL，提取主机名、端口和路径
-    PRF("source->valuestring:%s\n", source->valuestring);
+    HLK_LOG_INFO("source->valuestring:%s\n", source->valuestring);
     parse_http_url(source->valuestring, _host, &_port, _path);
 
-    PRF("host:%s, port:%d, path:%s\n", _host, _port, _path);
+    HLK_LOG_INFO("host:%s, port:%d, path:%s\n", _host, _port, _path);
 
     // 开始HTTP下载固件文件
     CURLcode res;
     res = hlk_ota_http(_host, _path);
     
     if (res == CURLE_OK) {
-        PRF("Version upgrade running\n");
+        HLK_LOG_INFO("Version upgrade running\n");
         
         // 下载成功，更新升级状态为1（准备安装）
         hlk_ota_write_version(SYSUPGRADE_MSGID_PATH, &get_, 1);
@@ -1897,7 +1907,7 @@ static void hlk_mqtt_handle_ota(MessageData *data)
     }else{
         // 下载失败，向云端报告错误
         hlk_mqtt_report_version(HLK_OTA_FLASH_CHECK_ERR, 0, g_ota_msgid);
-        PRF("Version upgrade failed\n");
+        HLK_LOG_ERR("Version upgrade failed\n");
     }
 
 exit:
@@ -1963,7 +1973,7 @@ static void md5_encode(void)
 
     // 获取当前时间戳 - 使用Zig实现避免ABI兼容性问题
     timesnow = zig_get_timestamp();
-    PRF("timesnow:%lld\n", (long long)timesnow);
+    HLK_LOG_INFO("timesnow:%lld\n", (long long)timesnow);
     sprintf(timestamp, "%lld", (long long)timesnow);
 
     // 获取WAN接口的IP地址和MAC地址
@@ -1975,17 +1985,17 @@ static void md5_encode(void)
     sprintf(mqtt_connect_cret.id, "%s|%s|%s|%s|%s", 
             mqtt_user_cert.productKey, "adsfrm65tasd", MODULE_TYPE,
             mqtt_user_cert.deviceName, NET_TYPE);
-    PRF("id:%s\n", mqtt_connect_cret.id);
+    HLK_LOG_INFO("id:%s\n", mqtt_connect_cret.id);
     
     // 构建MQTT用户名
     // 格式：设备名称|时间戳000|本地IP|MAC地址
     sprintf(mqtt_connect_cret.user_name, "%s|%s000|%s|%s", 
             mqtt_user_cert.deviceName, timestamp, local_ip, mac);
-    PRF("user_name = %s\n", mqtt_connect_cret.user_name);
+    HLK_LOG_INFO("user_name = %s\n", mqtt_connect_cret.user_name);
     
     // 初始化密码前缀
     sprintf(mqtt_connect_cret.password, "$md5$%s$", timestamp);
-    PRF("password:%s\n", mqtt_connect_cret.password);
+    HLK_LOG_INFO("password:%s\n", mqtt_connect_cret.password);
 
     // 第一次MD5加密：对设备密钥进行加密
     MD5_CTX md5;
@@ -2026,7 +2036,7 @@ static void md5_encode(void)
  ******************************************************************************/
 int hlk_MQTTYield(SHARED_DATA_S *sharedData)
 {
-    PRF("MQTTYield\r\n");
+    HLK_LOG_INFO("MQTTYield\r\n");
     int rc;
     
     time_t time_start, time_ping;
@@ -2044,7 +2054,7 @@ int hlk_MQTTYield(SHARED_DATA_S *sharedData)
         if ((rc = MQTTYield(hlk_iot.client, 1000)) != SUCCESS)
         {
             // MQTT连接出现问题，进行清理和重连准备
-            PRF("rc = %d Disconnect_\r\n", rc);
+            HLK_LOG_ERR("rc = %d Disconnect_\r\n", rc);
             MQTTDisconnect(hlk_iot.client);           // 断开MQTT连接
             NetworkDisconnect(hlk_iot.network);        // 断开网络连接
             app_msleep(10 * 1000);                     // 等待10秒后重试
@@ -2088,7 +2098,7 @@ int hlk_mqtt_main()
     {
         // 连接海凌科私有云MQTT平台
         case MQTT_CONNECT_HLK:
-            PRF("MQTT_CONNECT_HLK\r\n");
+            HLK_LOG_INFO("MQTT_CONNECT_HLK\r\n");
             
             // 获取设备五元组认证信息
             if(get_mqtt_user_certification_h() != 0){
@@ -2097,21 +2107,21 @@ int hlk_mqtt_main()
             } 
             
             // 生成MD5加密的连接认证信息
-            printf("md5_encode\r\n");
+            HLK_LOG_INFO("md5_encode\r\n");
             md5_encode();
             
             // 初始化所有MQTT主题
-            printf("mqtt_topic_type_init\r\n"); 
+            HLK_LOG_INFO("mqtt_topic_type_init\r\n"); 
             mqtt_topic_type_init();
             
             // 设置消息处理函数
-            printf("hlk_MQTTYield\r\n");
+            HLK_LOG_INFO("hlk_MQTTYield\r\n");
             hlk_iot.func = hlk_MQTTYield;
             break;
             
         // 连接其他第三方MQTT平台（预留接口）
         case MQTT_CONNECT_OTHER:
-            PRF("MQTT_CONNECT_OTHER\r\n");
+            HLK_LOG_INFO("MQTT_CONNECT_OTHER\r\n");
             // 注释掉的代码为其他平台连接预留
             //get_mqtt_user_certification_o();  // 获取其他平台认证
             //hlk_iot.func = other_MQTTYield;   // 设置其他平台处理函数
@@ -2119,7 +2129,7 @@ int hlk_mqtt_main()
             
         // 默认连接方式（当前未实现）
         default:
-            PRF("MQTT_CONNECT_DEFAULT\r\n");
+            HLK_LOG_INFO("MQTT_CONNECT_DEFAULT\r\n");
             // 注释掉的代码为默认连接方式预留
             //get_mqtt_user_certification_h();
             //md5_encode();
@@ -2142,7 +2152,7 @@ static int push_data_to_sse(const char *channel, const char *data)
     int result = 0;
     
     if (!channel || !data) {
-        PRF("push_data_to_sse: invalid parameters\n");
+        HLK_LOG_ERR("push_data_to_sse: invalid parameters\n");
         return -1;
     }
     
@@ -2154,12 +2164,12 @@ static int push_data_to_sse(const char *channel, const char *data)
     if (pipe_fd < 0) {
         // 如果管道不存在或无法打开，创建管道
         if (mkfifo(SSE_DATA_PIPE_PATH, 0666) == 0) {
-            PRF("Created SSE data pipe: %s\n", SSE_DATA_PIPE_PATH);
+            HLK_LOG_INFO("Created SSE data pipe: %s\n", SSE_DATA_PIPE_PATH);
             pipe_fd = open(SSE_DATA_PIPE_PATH, O_WRONLY | O_NONBLOCK);
         }
         
         if (pipe_fd < 0) {
-            PRF("Failed to open SSE data pipe: %s\n", strerror(errno));
+            HLK_LOG_ERR("Failed to open SSE data pipe: %s\n", strerror(errno));
             return -1;
         }
     }
@@ -2168,13 +2178,13 @@ static int push_data_to_sse(const char *channel, const char *data)
     ssize_t written = write(pipe_fd, pipe_message, strlen(pipe_message));
     if (written < 0) {
         if (errno != EAGAIN && errno != EPIPE) {
-            PRF("Failed to write to SSE pipe: %s\n", strerror(errno));
+            HLK_LOG_ERR("Failed to write to SSE pipe: %s\n", strerror(errno));
             result = -1;
         } else {
-            PRF("No SSE clients listening (pipe full or broken)\n");
+            HLK_LOG_ERR("No SSE clients listening (pipe full or broken)\n");
         }
     } else {
-        PRF("Pushed data to SSE: channel=%s, size=%zd bytes\n", channel, written);
+        HLK_LOG_INFO("Pushed data to SSE: channel=%s, size=%zd bytes\n", channel, written);
     }
     
     close(pipe_fd);
@@ -2194,9 +2204,9 @@ static int push_data_to_sse(const char *channel, const char *data)
 char *hlk_get_signature(char *timestamp, char *Token, char *Nonce, char *signature)
 {
     // 打印传入参数
-    printf("Timestamp: %s\n", timestamp);
-    printf("Token: %s\n", Token);
-    printf("Nonce: %s\n", Nonce);
+    HLK_LOG_INFO("Timestamp: %s\n", timestamp);
+    HLK_LOG_INFO("Token: %s\n", Token);
+    HLK_LOG_INFO("Nonce: %s\n", Nonce);
 
     char *a[3];
     a[0] = timestamp;
@@ -2212,7 +2222,7 @@ char *hlk_get_signature(char *timestamp, char *Token, char *Nonce, char *signatu
     // 拼接字符串
     char sha1_ori[256] = {0};
     sprintf(sha1_ori, "%s%s%s", a[0], a[1], a[2]);
-    printf("strcat string:%s\n", sha1_ori);
+    HLK_LOG_INFO("strcat string:%s\n", sha1_ori);
 
     // 计算SHA1
     unsigned char sha1_result[SHA_DIGEST_LENGTH]; // SHA1结果是20字节
@@ -2223,7 +2233,7 @@ char *hlk_get_signature(char *timestamp, char *Token, char *Nonce, char *signatu
         sprintf(signature + (i * 2), "%02x", sha1_result[i]);
     }
 
-    printf("finish!!!!!  %s\r\n", signature);
+    HLK_LOG_INFO("finish!!!!!  %s\r\n", signature);
     return signature;
 }
 
@@ -2242,8 +2252,8 @@ time_t get_system_timestamp(void)
 
     // 检查时间是否合理（大于2021-01-01 00:00:00 UTC的时间戳）
     if (current_time < 1609459200) {
-        PRF("Warning: System time appears to be incorrect (timestamp: %lld)\n", current_time);
-        PRF("Please ensure system time is properly synchronized\n");
+        HLK_LOG_ERR("Warning: System time appears to be incorrect (timestamp: %lld)\n", current_time);
+        HLK_LOG_ERR("Please ensure system time is properly synchronized\n");
         // 返回错误值，让调用者处理
         return 0;
     }
@@ -2261,16 +2271,16 @@ time_t get_system_timestamp(void)
  ******************************************************************************/
 int sync_system_time(void)
 {
-    printf("Attempting to sync system time...\n");
+    HLK_LOG_INFO("Attempting to sync system time...\n");
 
     // 方法1: 尝试使用 ntpdate 命令同步时间
     int ret = system("ntpdate -u pool.ntp.org > /dev/null 2>&1");
     if (ret == 0) {
-        printf("System time synchronized successfully using ntpdate\n");
+        HLK_LOG_INFO("System time synchronized successfully using ntpdate\n");
         return 0;
     }
 
-    printf("Please ensure system time is manually synchronized\n");
+    HLK_LOG_ERR("Please ensure system time is manually synchronized\n");
 
     return -1;
 }
@@ -2280,12 +2290,12 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
     size_t realsize = size * nmemb;
     struct MemoryStruct *mem = (struct MemoryStruct *)stream;
 
-    PRF("%s\n", ptr);
+    HLK_LOG_INFO("%s\n", ptr);
 
     // 重新分配内存以容纳新数据
     char *ptr_realloc = realloc(mem->memory, mem->size + realsize + 1);
     if (ptr_realloc == NULL) {
-        PRF("quest_write_callback: realloc failed\n");
+        HLK_LOG_ERR("quest_write_callback: realloc failed\n");
         return 0;
     }
 

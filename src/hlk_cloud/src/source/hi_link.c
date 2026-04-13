@@ -48,6 +48,7 @@
 #include "app_api.h"
 #include "hi_link.h"
 #include "hi_mqtt.h"
+#include "hlk_log.h"
 
 #ifdef SUPPORT_OPENWRT
 #include "openwrt/openwrt.h"
@@ -233,29 +234,29 @@ void getopts(int argc, char** argv)
 int hi_link_set_channel_value(const char *channel, const hi_link_value_t *value)
 {
     if (!channel || !value) {
-        PRF("hi_link_set_channel_value: Invalid parameters\r\n");
+        HLK_LOG_ERR("hi_link_set_channel_value: Invalid parameters\r\n");
         return -1;
     }
 
     switch (value->type) {
         case HI_LINK_TYPE_STRING:
-            PRF("hi_link_set_channel_value channel: %s, string value: %s\r\n", 
+            HLK_LOG_INFO("hi_link_set_channel_value channel: %s, string value: %s\r\n", 
                 channel, value->data.str_val ? value->data.str_val : "NULL");
             break;
         case HI_LINK_TYPE_INT:
-            PRF("hi_link_set_channel_value channel: %s, int value: %d\r\n", 
+            HLK_LOG_INFO("hi_link_set_channel_value channel: %s, int value: %d\r\n", 
                 channel, value->data.int_val);
             break;
         case HI_LINK_TYPE_FLOAT:
-            PRF("hi_link_set_channel_value channel: %s, float value: %.2f\r\n", 
+            HLK_LOG_INFO("hi_link_set_channel_value channel: %s, float value: %.2f\r\n", 
                 channel, value->data.float_val);
             break;
         case HI_LINK_TYPE_BOOL:
-            PRF("hi_link_set_channel_value channel: %s, bool value: %s\r\n", 
+            HLK_LOG_INFO("hi_link_set_channel_value channel: %s, bool value: %s\r\n", 
                 channel, value->data.bool_val ? "true" : "false");
             break;
         default:
-            PRF("hi_link_set_channel_value: Unknown value type %d\r\n", value->type);
+            HLK_LOG_ERR("hi_link_set_channel_value: Unknown value type %d\r\n", value->type);
             return -1;
     }
 
@@ -270,11 +271,11 @@ int hi_link_set_channel_value(const char *channel, const hi_link_value_t *value)
 int hi_link_get_channel_value(const char *channel, hi_link_value_t *value)
 {
     if (!channel || !value) {
-        PRF("hi_link_get_channel_value: Invalid parameters\r\n");
+        HLK_LOG_ERR("hi_link_get_channel_value: Invalid parameters\r\n");
         return -1;
     }
 
-    PRF("hi_link_get_channel_value channel: %s\r\n", channel);
+    HLK_LOG_INFO("hi_link_get_channel_value channel: %s\r\n", channel);
 
     #if defined(SUPPORT_OPENWRT)
     int ret = hi_link_get_channel_value_openwrt(channel, value);
@@ -285,16 +286,16 @@ int hi_link_get_channel_value(const char *channel, hi_link_value_t *value)
     if (ret == 0) {
         switch (value->type) {
             case HI_LINK_TYPE_STRING:
-                PRF("Got string value: %s\r\n", value->data.str_val ? value->data.str_val : "NULL");
+                HLK_LOG_INFO("Got string value: %s\r\n", value->data.str_val ? value->data.str_val : "NULL");
                 break;
             case HI_LINK_TYPE_INT:
-                PRF("Got int value: %d\r\n", value->data.int_val);
+                HLK_LOG_INFO("Got int value: %d\r\n", value->data.int_val);
                 break;
             case HI_LINK_TYPE_FLOAT:
-                PRF("Got float value: %.2f\r\n", value->data.float_val);
+				HLK_LOG_INFO("Got float value: %.2f\r\n", value->data.float_val);
                 break;
             case HI_LINK_TYPE_BOOL:
-                PRF("Got bool value: %s\r\n", value->data.bool_val ? "true" : "false");
+				HLK_LOG_INFO("Got bool value: %s\r\n", value->data.bool_val ? "true" : "false");
                 break;
         }
     }
@@ -438,7 +439,7 @@ void set_cloud_status(int cloud_status)
 ******************************************************************************/
 int mqtt_main(struct Options options)
 {
-    PRF("mqtt_main\r\n");
+    HLK_LOG_INFO("mqtt_main\r\n");
     #if 1
 	/* MQTT相关变量定义 */
 	Network n;                    /* 网络连接对象 */
@@ -456,7 +457,7 @@ conn:
 	memset(&n, 0, sizeof(Network));
 	NetworkInit(&n);
 	
-	PRF("options.host %s  options.port %d\r\n",options.host, options.port);
+	HLK_LOG_INFO("options.host %s  options.port %d\r\n",options.host, options.port);
 	//创建标识私有云连接的文件
 	system("touch /tmp/cloud_CLOUD_status");
 	set_cloud_status(MQTT_CONNECT_STATUS_CONNECTING);
@@ -466,7 +467,7 @@ conn:
 	if(rc != SUCCESS){
 		/* 连接失败，断开网络连接并重试 */
 		NetworkDisconnect(&n);
-		PRF("NetworkConnect rc : %d\n",rc);
+		HLK_LOG_ERR("NetworkConnect rc : %d\n",rc);
 		app_msleep(MQTT_RECONNECT_INTERVAL);  /* 等待10秒后重试 */
 		goto conn;
 	}
@@ -506,12 +507,12 @@ conn:
 	rc = MQTTConnect(&c, &data);
 	if (rc != SUCCESS){
 		/* MQTT连接失败，重试 */
-		PRF("\r\nMQTT Connect failed !\r\n");
+		HLK_LOG_ERR("\r\nMQTT Connect failed !\r\n");
 		NetworkDisconnect(&n);
 		app_msleep(1000);
 		goto conn;
 	}
-    PRF("MQTT Connecting\r\n");
+    HLK_LOG_INFO("MQTT Connecting\r\n");
 
 	/* 保存MQTT客户端和网络连接对象到全局IoT结构体 */
 	hlk_iot.client = &c;
@@ -589,9 +590,9 @@ static void *hlk_user_main(void *arg)
 
 	/* 创建socket处理线程 */
 	if((rc = pthread_create(&thread[0], NULL, socket_main, (void *)&sharedData)) != 0) 
-		PRF(" socket thread create failed !\n");
+		HLK_LOG_ERR(" socket thread create failed !\n");
 	else
-		PRF(" socket thread create success !\n");
+	HLK_LOG_INFO(" socket thread create success !\n");
 
 	/* 执行测试循环 */
 	for (i = 0; i < options.iterations; ++i){
@@ -622,10 +623,11 @@ hi_int32 hi_link_init(void)
 int32_t hi_link_init(void)
 #endif
 {
+	hlk_log_open("hlk_cloud", LOG_DAEMON);
     /* 打印应用启动信息 */
-    printf("\r\n-----------------------------------------------------------------------------\r\n");
-    printf("\r\n----------------------------------APP_Start----------------------------------\r\n");
-    printf("\r\n-----------------------------------------------------------------------------\r\n");
+    HLK_LOG_INFO("\r\n-----------------------------------------------------------------------------\r\n");
+    HLK_LOG_INFO("\r\n----------------------------------APP_Start----------------------------------\r\n");
+    HLK_LOG_INFO("\r\n-----------------------------------------------------------------------------\r\n");
     
     /* 创建U2C通知器，用于用户空间到内核空间的通信 */
 	#ifdef HLK_PRODUCT_WR10
@@ -666,7 +668,8 @@ hi_void hi_link_exit(void)
 void hi_link_exit(void)
 #endif
 {
-    printf("%s,%d\r\n",__func__,__LINE__);
+    HLK_LOG_INFO("App Exit\n");
+	
     
     /* 如果用户线程存在，则取消并清理线程 */
     if (g_user_pthread_id != NULL)

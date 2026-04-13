@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include  <syslog.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 
@@ -42,6 +43,7 @@ extern "C"
     {                                                        \
         printf("< Line:%d  :%s>> ", __LINE__, __FUNCTION__); \
         printf(fmt, ##args);                                 \
+        syslog(LOG_INFO, fmt, ##args);                       \
     } while (0)
 #else
 #define DBG_PRINTF(fmt, args...)

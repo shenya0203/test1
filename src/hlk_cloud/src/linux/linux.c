@@ -18,6 +18,7 @@
 #include "hi_mqtt.h"
 #include "hi_link_ipc.h"
 #include "app_api.h"
+#include "hlk_log.h"
 
 
 typedef struct {
@@ -54,14 +55,14 @@ void led_blink(int times)
 
 int hi_link_set_channel_value_linux(char *channel, int value)
 {
-    PRF("hi_link_set_channel_value_linux channel: %s, value: %d\r\n", channel, value);
+    HLK_LOG_INFO("hi_link_set_channel_value_linux channel: %s, value: %d\r\n", channel, value);
     return 0;
 }
 
 
 int hi_link_get_channel_value_linux(char *channel, int *value)
 {
-    PRF("hi_link_get_channel_value_linux channel: %s\r\n", channel);
+    HLK_LOG_INFO("hi_link_get_channel_value_linux channel: %s\r\n", channel);
     return 0;
 }
 
@@ -88,10 +89,10 @@ void mt7628_upgrade_firmware(void)
     if (access(SYSUPGRADE_BIN_PATH_TMP, F_OK) == 0) {
         SYSTEM("touch /tmp/is_upgrade_ing");
         if (mtd_write_firmware(SYSUPGRADE_BIN_PATH_TMP)) {
-            PRF("mt7628_upgrade_firmware mtd_write_firmware failed\r\n");
+            HLK_LOG_ERR("mt7628_upgrade_firmware mtd_write_firmware failed\r\n");
             return;
         }
     } else {
-        PRF("mt7628_upgrade_firmware file not found\r\n");
+        HLK_LOG_ERR("mt7628_upgrade_firmware file not found\r\n");
     }
 }
