@@ -19,6 +19,7 @@
 #include <fcntl.h>       // 添加fcntl相关函数
 #include "MQTTLinux.h"
 #include "hi_link.h"
+#include "hlk_log.h"
 #include "app_api.h"     // 包含Zig实现的函数声明
 void TimerInit(Timer* timer)
 {
@@ -68,7 +69,7 @@ int linux_read(Network* n, unsigned char* buffer, int len, int timeout_ms)
 	// 参数验证
 	if (timeout_ms < 0)
 	{
-		PRF("linux_read: Invalid timeout_ms=%d, using default 1000ms\n", timeout_ms);
+		HLK_LOG_ERR("linux_read: Invalid timeout_ms=%d, using default 1000ms\n", timeout_ms);
 		timeout_ms = 1000;
 	}
 
@@ -76,14 +77,14 @@ int linux_read(Network* n, unsigned char* buffer, int len, int timeout_ms)
 	int flags = fcntl(n->my_socket, F_GETFL, 0);
 	if (flags == -1)
 	{
-		PRF("linux_read: fcntl F_GETFL failed with error: %s (errno=%d)\n", strerror(errno), errno);
+		HLK_LOG_ERR("linux_read: fcntl F_GETFL failed with error: %s (errno=%d)\n", strerror(errno), errno);
 		return -1;
 	}
 
 	// 设置socket为非阻塞模式
 	if (fcntl(n->my_socket, F_SETFL, flags | O_NONBLOCK) == -1)
 	{
-		PRF("linux_read: fcntl F_SETFL failed with error: %s (errno=%d)\n", strerror(errno), errno);
+		HLK_LOG_ERR("linux_read: fcntl F_SETFL failed with error: %s (errno=%d)\n", strerror(errno), errno);
 		return -1;
 	}
 
@@ -120,7 +121,7 @@ int linux_read(Network* n, unsigned char* buffer, int len, int timeout_ms)
 		if (select_result == -1)
 		{
 			int saved_errno = errno;
-			PRF("linux_read: select failed with error: %s (errno=%d)\n", strerror(saved_errno), saved_errno);
+			HLK_LOG_ERR("linux_read: select failed with error: %s (errno=%d)\n", strerror(saved_errno), saved_errno);
 			bytes = -1;
 			break;
 		}
@@ -140,12 +141,12 @@ int linux_read(Network* n, unsigned char* buffer, int len, int timeout_ms)
 				if (saved_errno == EAGAIN || saved_errno == EWOULDBLOCK)
 				{
 					// 这种情况在select返回可读后不应该发生，但为了安全起见继续循环
-					PRF("linux_read: recv would block after select indicated ready\n");
+					HLK_LOG_ERR("linux_read: recv would block after select indicated ready\n");
 					continue;
 				}
 				else
 				{
-					PRF("linux_read: recv failed with error: %s (errno=%d)\n", strerror(saved_errno), saved_errno);
+					HLK_LOG_ERR("linux_read: recv failed with error: %s (errno=%d)\n", strerror(saved_errno), saved_errno);
 					bytes = -1;
 					break;
 				}
@@ -165,7 +166,7 @@ int linux_read(Network* n, unsigned char* buffer, int len, int timeout_ms)
 	// 恢复socket为原来的阻塞模式
 	if (fcntl(n->my_socket, F_SETFL, flags) == -1)
 	{
-		PRF("linux_read: fcntl restore flags failed with error: %s (errno=%d)\n", strerror(errno), errno);
+		HLK_LOG_ERR("linux_read: fcntl restore flags failed with error: %s (errno=%d)\n", strerror(errno), errno);
 	}
 
 	return bytes;
@@ -200,10 +201,10 @@ int NetworkConnect(Network* n, char* addr, int port)
 	int retVal = -1;
 
     struct hostent *hostinfo = gethostbyname(addr);
-	PRF("NetworkConnect\n");
+	HLK_LOG_INFO("NetworkConnect\n");
 	if(hostinfo == NULL)
 	{
-		PRF("hostinfo == NULL\n");
+		HLK_LOG_ERR("hostinfo == NULL\n");
 		return retVal;
 	}
     sAddr.sin_family = AF_INET;
@@ -215,10 +216,10 @@ int NetworkConnect(Network* n, char* addr, int port)
 	tmp_addr.s_addr = address;  // 将 uint32_t 赋值给 s_addr
 	char *ip = inet_ntoa(tmp_addr);
     // char *ip = inet_ntoa(address);
-    PRF("Server ip Address : %s\r\n", ip);
+    HLK_LOG_INFO("Server ip Address : %s\r\n", ip);
 
 	if ((n->my_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0){
-		PRF("my_socket--->errr\r\n");
+		HLK_LOG_ERR("my_socket--->errr\r\n");
 		goto exit;
 	}
 		
@@ -242,10 +243,10 @@ int NetworkConnect(Network* n, char* addr, int port)
 	// printf("-----------------%s %d  %d %d\n",__func__,__LINE__,recvbuf,len);
 	// recvbuf = 200;
 	// getsockopt( n->my_socket, SOL_SOCKET, SO_RCVBUF, &recvbuf, &len );
-	PRF("start_Connect--------->\r\n");
+	HLK_LOG_INFO("start_Connect--------->\r\n");
 	if ((retVal = connect(n->my_socket, (const struct sockaddr *)&sAddr, sizeof(sAddr))) < 0)
 	{
-		PRF("Connect err\n");
+		HLK_LOG_ERR("Connect err\n");
 		close(n->my_socket);
 	    goto exit;
 	}

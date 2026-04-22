@@ -19,6 +19,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include "hlk_log.h"
 
 static void NewMessageData(MessageData* md, MQTTString* aTopicName, MQTTMessage* aMessage) {
     md->topicName = aTopicName;
@@ -232,7 +233,7 @@ int keepalive(MQTTClient* c)
             // 如果仅仅是 received_expired (接收超时)，那是正常的等待过程。
             if (sent_expired) {
                 rc = FAILURE; /* PINGRESP not received in keepalive interval */
-                printf("Keepalive failure: Ping outstanding and send timer expired\n");
+                HLK_LOG_ERR("Keepalive failure: Ping outstanding and send timer expired\n");
             }
             // 否则，虽然 received_expired 为真，但我们还在等待 Ping 回复，不算失败
         }
@@ -287,7 +288,7 @@ int cycle(MQTTClient* c, Timer* timer)
         default:
             /* no more data to read, unrecoverable. Or read packet fails due to unexpected network error */
             rc = packet_type;
-            printf("MQTT read error %d\n", rc);
+            HLK_LOG_ERR("MQTT read error %d\n", rc);
             goto exit;
         case 0: /* timed out reading packet */
             break;
@@ -317,7 +318,7 @@ int cycle(MQTTClient* c, Timer* timer)
                     len = MQTTSerialize_ack(c->buf, c->buf_size, PUBREC, 0, msg.id);
                 if (len <= 0)
                 {
-                    printf("MQTT Serialize ack error\n");
+                    HLK_LOG_ERR("MQTT Serialize ack error\n");
                     rc = FAILURE;
                 }
                 else {
@@ -325,7 +326,7 @@ int cycle(MQTTClient* c, Timer* timer)
                 }
                 if (rc == FAILURE)
                 {
-                    printf("MQTT send ack error\n");
+                    HLK_LOG_ERR("MQTT send ack error\n");
                     goto exit; // there was a problem
                 }
             }
@@ -365,7 +366,7 @@ int cycle(MQTTClient* c, Timer* timer)
 
     if (keepalive(c) != SUCCESS) {
         //check only keepalive FAILURE status so that previous FAILURE status can be considered as FAULT'
-        printf("MQTT keepalive error\n");
+        HLK_LOG_ERR("MQTT keepalive error\n");
         rc = FAILURE;
     }
 

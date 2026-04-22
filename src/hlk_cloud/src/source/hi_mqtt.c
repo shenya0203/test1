@@ -103,7 +103,11 @@ int __lstat_time64(const char *path, struct stat *st) {
 #elif defined(HLK_PRODUCT_RM65) || defined(HLK_PRODUCT_RM50)
 #include "openwrt/openwrt.h"
 #elif defined(HLK_PRODUCT_7628)
+#ifdef SUPPORT_OPENWRT
+#include "openwrt/openwrt.h"
+#else
 #include "linux/linux.h"
+#endif
 #endif
 
 // 项目自定义头文件
@@ -208,6 +212,8 @@ typedef struct
     char deviceSecret[PRODUCT_KEY_MAXLEN + 1];
     char projectKey[PRODUCT_KEY_MAXLEN];
 } ALINKDEV_t;
+
+extern void hlk_mqtt_handle_data_points_down(cJSON *root);   //在data_collector.c中定义
 
 // 全局变量定义
 static int g_mqtt_flag = 0;           // MQTT连接状态标志位
@@ -339,7 +345,11 @@ int fota_Upgrade_Writing(void)
     //7628固件升级
     //固件组成：固件头 MD5 固件 32字节  更新内容 1024-32字节，固件 
     //1. 禁止页面升级
-    mt7628_upgrade_firmware();
+        #if defined(SUPPORT_OPENWRT)
+        openwrt_upgrade_firmware();
+        #else
+        mt7628_upgrade_firmware();
+        #endif
     #endif
 
     return ret;
@@ -434,7 +444,7 @@ int hlk_mqtt_publish(char *topic, int qos, void *data, int len)
     pubmsg.payloadlen = len;   // 载荷数据长度
     pubmsg.dup = 0;           // 非重复消息
 
-    PRF("#### Topic: %s Data: %s\n", topic, (char*)data);
+    HLK_LOG_INFO("#### Topic: %s Data: %s\n", topic, (char*)data);
 
     // 调用MQTT库发布消息
     return MQTTPublish(hlk_iot.client, topic, &pubmsg);
@@ -559,7 +569,7 @@ int hlk_mqtt_ping(void)
         HLK_LOG_ERR("Failed to allocate memory for JSON formatted.");
         return -1;
     }
-    //PRF("#### %s\n", str);
+    //HLK_LOG_INFO("#### %s\n", str);
 
     // 通过MQTT发布心跳包到指定主题
     ret = hlk_mqtt_publish(mqtt_topic_type_table[TOPIC_PING_POST].topic, QOS0, str, strlen(str));
@@ -683,7 +693,7 @@ static void hlk_mqtt_handle_app(MessageData *pdata)
     if (strcmp(name, "DataPointsDown") == 0) {
         //处理来自 DataPointsDown 的信息
         //云端下发信息 有两种情况 一个是设置 一个是采集
-        hlk_mqtt_handle_data_points_down(root);
+        hlk_mqtt_handle_data_points_down(inputData);
         cJSON_Delete(root);
         return;
     }
@@ -1916,7 +1926,6 @@ exit:
         cJSON_Delete(root);
 }
 
-extern void hlk_mqtt_handle_data_points_down(MessageData *pdata);   //在data_collector.c中定义
 
 /******************************************************************************
  * 函数名    : mqtt_subscribe_parse
@@ -1948,7 +1957,7 @@ void mqtt_subscribe_parse()
     MQTTSubscribe(hlk_iot.client, mqtt_topic_type_table[TOPIC_UPGRADE].topic, 0, hlk_mqtt_handle_ota);
 
 
-    MQTTSubscribe(hlk_iot.client, mqtt_topic_type_table[DATA_POINTS_DOWN].topic, 0, hlk_mqtt_handle_data_points_down);
+    //MQTTSubscribe(hlk_iot.client, mqtt_topic_type_table[DATA_POINTS_DOWN].topic, 0, hlk_mqtt_handle_data_points_down);
 
     return;
 }
@@ -2317,7 +2326,7 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
  ******************************************************************************/
  int query_request_address(void)
  {
-     PRF("query_request_address\n");
+     HLK_LOG_INFO("query_request_address\n");
      int ret = 0;
      CURL *curl = NULL;
      CURLcode res;
@@ -2326,7 +2335,7 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
      // 初始化响应数据结构体
      response_data.memory = malloc(1024);
      if (response_data.memory == NULL) {
-        PRF("Failed to allocate memory for response\n");
+        HLK_LOG_INFO("Failed to allocate memory for response\n");
          return -1;
      }
      response_data.size = 0;
@@ -2337,26 +2346,26 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
      ALINKDEV_t *g_hlk_devinfo = &hlk_devinfo;
  
      if (get_device_credentials(g_hlk_devinfo) != 0) {
-        PRF("Failed to get device credentials\n");
-         free(g_hlk_devinfo);
-         free(response_data.memory);
-         return -1;
+        HLK_LOG_INFO("Failed to get device credentials\n");
+        free(g_hlk_devinfo);
+        free(response_data.memory);
+        return -1;
      }
 
-     PRF("DN:%s\n", g_hlk_devinfo->deviceName);
-     PRF("PJ:%s\n", g_hlk_devinfo->projectKey);
-     PRF("PK:%s\n", g_hlk_devinfo->productKey);
-     PRF("PS:%s\n", g_hlk_devinfo->productSecret);
-     PRF("DS:%s\n", g_hlk_devinfo->deviceSecret);
+     HLK_LOG_INFO("DN:%s\n", g_hlk_devinfo->deviceName);
+     HLK_LOG_INFO("PJ:%s\n", g_hlk_devinfo->projectKey);
+     HLK_LOG_INFO("PK:%s\n", g_hlk_devinfo->productKey);
+     HLK_LOG_INFO("PS:%s\n", g_hlk_devinfo->productSecret);
+     HLK_LOG_INFO("DS:%s\n", g_hlk_devinfo->deviceSecret);
  
      // 获取系统时间戳，如果无效则尝试同步
      time_t time_now = get_system_timestamp();
      if (time_now == 0) {
-        PRF("System time appears to be invalid, attempting to sync...\n");
+        HLK_LOG_INFO("System time appears to be invalid, attempting to sync...\n");
  
          // 尝试同步系统时间
          if (sync_system_time() != 0) {
-            PRF("Failed to sync system time\n");
+            HLK_LOG_INFO("Failed to sync system time\n");
              free(response_data.memory);
              return -1;
          }
@@ -2364,12 +2373,12 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
          // 重新获取时间戳
          time_now = get_system_timestamp();
          if (time_now == 0) {
-            PRF("System time is still invalid after sync attempt\n");
+            HLK_LOG_INFO("System time is still invalid after sync attempt\n");
              free(response_data.memory);
              return -1;
          }
  
-         PRF("System time synchronized successfully\n");
+         HLK_LOG_INFO("System time synchronized successfully\n");
      }
  
      // 生成时间戳字符串
@@ -2390,7 +2399,7 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
 
     /* 初始化libcurl全局环境 - 防止在无网络环境下出现段错误 */
     if (curl_global_init(CURL_GLOBAL_DEFAULT) != 0) {
-        PRF("Failed to initialize libcurl global environment\n");
+        HLK_LOG_INFO("Failed to initialize libcurl global environment\n");
         free(response_data.memory);
         return -1;
     }
@@ -2399,7 +2408,7 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
      // 初始化libcurl
      curl = curl_easy_init();
      if (!curl) {
-        PRF("Failed to initialize curl\n");
+        HLK_LOG_INFO("Failed to initialize curl\n");
          free(response_data.memory);
          return -1;
      }
@@ -2453,9 +2462,9 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
     // 执行请求
     res = curl_easy_perform(curl);
     if (res != CURLE_OK) {
-        PRF("curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
+        HLK_LOG_INFO("curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
         if (strlen(errbuf) > 0) {
-            PRF("Detailed error: %s\n", errbuf);
+            HLK_LOG_INFO("Detailed error: %s\n", errbuf);
         }
         curl_easy_cleanup(curl);
         curl_slist_free_all(headers);
@@ -2463,12 +2472,12 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
         return -1;
     }
  
-    PRF("HTTP response: %s\n", response_data.memory);
+    HLK_LOG_INFO("HTTP response: %s\n", response_data.memory);
  
      // 解析JSON响应
     cJSON *json = cJSON_Parse(response_data.memory);
     if (json == NULL) {
-        PRF("Error parsing JSON response: %s\n", cJSON_GetErrorPtr());
+        HLK_LOG_INFO("Error parsing JSON response: %s\n", cJSON_GetErrorPtr());
          curl_easy_cleanup(curl);
          curl_slist_free_all(headers);
          free(response_data.memory);
@@ -2478,7 +2487,7 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
      // 检查响应状态码
      cJSON *code_status = cJSON_GetObjectItemCaseSensitive(json, "Code");
      if (!cJSON_IsNumber(code_status) || (code_status->valueint != 1)) {
-        PRF("API request failed. Code: %d\n", code_status->valueint);
+        HLK_LOG_INFO("API request failed. Code: %d\n", code_status->valueint);
          cJSON_Delete(json);
          curl_easy_cleanup(curl);
          curl_slist_free_all(headers);
@@ -2513,19 +2522,19 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
          }
          ret = 1;
  
-         PRF("MQTT Address: %s\n", mqttUrl);
-         PRF("Web API Address: %s\n", webApiUrl);
+         HLK_LOG_INFO("MQTT Address: %s\n", mqttUrl);
+         HLK_LOG_INFO("Web API Address: %s\n", webApiUrl);
  
          // 构建完整的API URL
          snprintf(postInfoUrl, sizeof(postInfoUrl), "%s%s", webApiUrl, POST_INIF_API);
          snprintf(postHistoryUrl, sizeof(postHistoryUrl), "%s%s", webApiUrl, POST_HISTORY_API);
          snprintf(postOtaInfoUrl, sizeof(postOtaInfoUrl), "%s%s", webApiUrl, POST_OTA_INFO);
  
-         PRF("postInfoUrl: %s\n", postInfoUrl);
-         PRF("postHistoryUrl: %s\n", postHistoryUrl);
-         PRF("postOtaInfoUrl: %s\n", postOtaInfoUrl);
+         HLK_LOG_INFO("postInfoUrl: %s\n", postInfoUrl);
+         HLK_LOG_INFO("postHistoryUrl: %s\n", postHistoryUrl);
+         HLK_LOG_INFO("postOtaInfoUrl: %s\n", postOtaInfoUrl);
      } else {
-        PRF("Data field is missing or not an array\n");
+        HLK_LOG_INFO("Data field is missing or not an array\n");
      }
  
      // 清理资源
@@ -2534,7 +2543,7 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
      curl_slist_free_all(headers);
      free(response_data.memory);
  
-     PRF("query_request_address completed with ret = %d\n", ret);
+     HLK_LOG_INFO("query_request_address completed with ret = %d\n", ret);
      return ret;
  }
 
@@ -2548,7 +2557,7 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
  ******************************************************************************/
 void switch_mqtt_url(char **url)
 {
-    PRF("switch_mqtt_url\n");
+    HLK_LOG_INFO("switch_mqtt_url\n");
     static char url_store[MQTT_URL_COUNT][MQTT_URL_LEN] = {0};
     int ret = -1;
 
@@ -2556,7 +2565,7 @@ void switch_mqtt_url(char **url)
     while (ret != 1)
     {
         ret = query_request_address();
-        PRF("query_request_address ret = %d\n", ret);
+        HLK_LOG_INFO("query_request_address ret = %d\n", ret);
         if (ret == 1)
         {
             // 查询成功，设置MQTT连接地址

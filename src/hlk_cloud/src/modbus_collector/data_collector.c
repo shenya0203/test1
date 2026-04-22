@@ -14,6 +14,11 @@
 #include "data_collector.h"
 #include "hlk_log.h"
 #include "hi_mqtt.h"
+#include <libubus.h>
+#include <libubox/blobmsg_json.h>
+
+// 全局上下文指针，供MQTT回调和UBUS使用
+collector_ctx_t *g_collector_ctx = NULL;
 
 // 共享内存定义保持不变...
 #define MODBUS_SHM_NAME "/modbus_shm"
@@ -754,6 +759,7 @@ collector_ctx_t* collector_init(void)
         // 即使 SHM 失败，ctx 仍然有效，只是采不到数据
     //}
 
+    g_collector_ctx = ctx;
     return ctx;
 }
 
@@ -1078,7 +1084,7 @@ int collector_report_data(collector_ctx_t *ctx)
     // 检查是否需要上报
     if (!should_report_data(ctx)) {
         //printf("[Collector] Skip report: conditions not met\n");
-        return 0;
+        return 1; // 1 表示 skip
     }
     HLK_LOG_INFO("[Collector] should_report_data: 1\n");
     collector_sync_data(ctx);
@@ -1159,13 +1165,234 @@ void collector_destroy(collector_ctx_t *ctx)
     free(ctx);
 }
 
+// UBUS调用完成的回调函数
+static void ubus_invoke_callback(struct ubus_request *req, int type, struct blob_attr *msg) {
+    (void)req;
+    (void)type;
+    (void)msg;
+}
+
+// UBUS调用，设置指定设备的数据点
+static int collector_set_point_value(const char* device_name, const char* point_name, double value) {
+    if (!device_name || !point_name) return -1;
+    
+    struct ubus_context *ubus_ctx = ubus_connect(NULL);
+    if (!ubus_ctx) {
+        HLK_LOG_ERR("[Collector] set_point_value: ubus connect failed\n");
+        return -1;
+    }
+
+    uint32_t id;
+    if (ubus_lookup_id(ubus_ctx, "modbus", &id) != 0) {
+        HLK_LOG_ERR("[Collector] set_point_value: Failed to look up modbus object\n");
+        ubus_free(ubus_ctx);
+        return -1;
+    }
+
+    struct blob_buf b = {0};
+    blob_buf_init(&b, 0);
+    blobmsg_add_string(&b, "point", point_name);
+    blobmsg_add_double(&b, "value", value);
+    blobmsg_add_string(&b, "device", device_name);
+
+    HLK_LOG_INFO("[Collector] set_point_value: invoking set_point_value for device:%s, point:%s, value:%.6f\n", device_name, point_name, value);
+
+    // 调用 ubus，超时时间5000ms
+    int ret = ubus_invoke(ubus_ctx, id, "set_point_value", b.head, ubus_invoke_callback, NULL, 5000);
+    if (ret != UBUS_STATUS_OK) {
+        HLK_LOG_ERR("[Collector] set_point_value: ubus_invoke failed, ret: %d\n", ret);
+    } else {
+        HLK_LOG_INFO("[Collector] set_point_value: ubus_invoke success\n");
+    }
+
+    blob_buf_free(&b);
+    ubus_free(ubus_ctx);
+    return (ret == UBUS_STATUS_OK) ? 0 : -1;
+}
+
+// 专门处理被下发操作的点位的立即上报
+static int collector_report_immediate_data(collector_ctx_t *ctx, const char *trace_id, char **point_names, int point_count) {
+    if (!ctx || !ctx->targets || ctx->target_count <= 0 || point_count <= 0) return -1;
+
+    // 先同步共享内存获取最新数据
+    collector_sync_data(ctx);
+
+    // 估算字符串长度
+    size_t estimated_len = 25; // time=xxxxxxxxx&
+    for (int i = 0; i < point_count; i++) {
+        estimated_len += 50 + 25 + 5; // point_name=数值&
+    }
+
+    char *result = (char*)malloc(estimated_len);
+    if (!result) return -1;
+    result[0] = '\0';
+    size_t current_len = 0;
+
+    time_t now = zig_get_timestamp();
+    char time_str[25];
+    snprintf(time_str, sizeof(time_str), "time=%lld&", now);
+    strncat(result, time_str, estimated_len - current_len - 1);
+    current_len = strlen(result);
+
+    for (int i = 0; i < point_count; i++) {
+        const char *target_point_name = point_names[i];
+        
+        // 在目标的列表中找当前请求的点位，获取它的最新值
+        for (int j = 0; j < ctx->target_count; j++) {
+            target_point_t *target = &ctx->targets[j];
+            if (strcmp(target->point_name, target_point_name) == 0) {
+                char point_str[85];
+                if (target->value_type == FLOAT_ABCD || target->value_type == FLOAT_CDAB || target->value_type == FLOAT_DCBA) {
+                    snprintf(point_str, sizeof(point_str), "%s=%.*f&", target->point_name, (int)target->decimal_places, target->current_value);
+                } else {
+                    snprintf(point_str, sizeof(point_str), "%s=%.0f&", target->point_name, target->current_value);
+                }
+                strncat(result, point_str, estimated_len - current_len - 1);
+                current_len = strlen(result);
+                break;
+            }
+        }
+    }
+
+    if (current_len > 0 && result[current_len - 1] == '&') {
+        result[current_len - 1] = '\0';
+        current_len--;
+    }
+
+    // 组装完整的 JSON
+    cJSON *json_root = cJSON_CreateObject();
+    if (!json_root) {
+        free(result);
+        return -1;
+    }
+
+    if (trace_id && strlen(trace_id) > 0) {
+        cJSON_AddStringToObject(json_root, "TraceId", trace_id);
+    }
+    cJSON_AddStringToObject(json_root, "DeviceCode", mqtt_user_cert.deviceName);
+
+    cJSON *items_array = cJSON_CreateArray();
+    if (items_array) {
+        cJSON *item = cJSON_CreateObject();
+        if (item) {
+            cJSON_AddNumberToObject(item, "Time", now);
+            cJSON_AddStringToObject(item, "Name", "DataPointsUp");
+            cJSON_AddStringToObject(item, "Value", result);
+            cJSON_AddItemToArray(items_array, item);
+        }
+        cJSON_AddItemToObject(json_root, "Items", items_array);
+    }
+
+    char *response_str = cJSON_PrintUnformatted(json_root);
+    cJSON_Delete(json_root);
+    free(result);
+
+    int rc = -1;
+    if (response_str) {
+        if (sharedData.connect_status == MQTT_CONNECT_STATUS_CONNECTED) {
+            rc = hlk_mqtt_publish(mqtt_topic_type_table[TOPIC_POST].topic, QOS0, response_str, strlen(response_str));
+            if (rc == 0) {
+                HLK_LOG_INFO("[Collector] Immediate report sent successfully. TraceId: %s\n", trace_id ? trace_id : "");
+            } else {
+                HLK_LOG_ERR("[Collector] Immediate report publish failed, rc=%d\n", rc);
+            }
+        }
+        free(response_str);
+    }
+    return (rc == 0) ? 0 : -1;
+}
+
 //处理下发的数据采集
 /******************************************************************************
  * 函数名    : hlk_mqtt_handle_data_points_down
  ******************************************************************************/
- void hlk_mqtt_handle_data_points_down(cJSON *root)
- {
-    //采集或者设置
-    //数据格式：{"Name":"DataPointsDown","Value":"Device1_state=","Address":"中国–广东–深圳 电信"},"StartTime":"","Expire":"","DeviceCode":"eZ71cXD5Mla","TraceId":"00-ac129b101775871038815c95de1d23-ac12520918b3c8c6-01","Type":null}
+void hlk_mqtt_handle_data_points_down(cJSON *root)
+{
+    if (!root) return;
+    char *json_str = cJSON_PrintUnformatted(root);
+    HLK_LOG_INFO("[Collector] Handle points down: %s\n", json_str);
+    free(json_str);
+
+    cJSON *trace_id_obj = cJSON_GetObjectItem(root, "TraceId");
+    const char *trace_id = (trace_id_obj && cJSON_IsString(trace_id_obj)) ? trace_id_obj->valuestring : "";
+
+    cJSON *value_obj = cJSON_GetObjectItem(root, "Value");
+    if (!value_obj || !cJSON_IsString(value_obj)) {
+        HLK_LOG_ERR("[Collector] Handle points down: Value field not found or not string\n");
+        return;
+    }
     
- }
+    char *value_str = strdup(value_obj->valuestring);
+    if (!value_str) return;
+
+    if (!g_collector_ctx) {
+        HLK_LOG_ERR("[Collector] Handle points down: g_collector_ctx is NULL\n");
+        free(value_str);
+        return;
+    }
+
+    // 分割 value_str 形式如 node0101=1.234&node0202=23.2 或 Device1_state=
+    char *saveptr;
+    char *token = strtok_r(value_str, "&", &saveptr);
+    
+    #define MAX_REQ_POINTS 100
+    char *requested_points[MAX_REQ_POINTS];
+    int req_point_count = 0;
+
+    int did_any_set = 0;
+
+    while (token != NULL && req_point_count < MAX_REQ_POINTS) {
+        char *eq_ptr = strchr(token, '=');
+        if (eq_ptr) {
+            *eq_ptr = '\0';
+            char *point_name = token;
+            char *point_val_str = eq_ptr + 1;
+
+            // 保存被请求的点位名，用于最后上报
+            requested_points[req_point_count] = strdup(point_name);
+            if (requested_points[req_point_count]) {
+                req_point_count++;
+            }
+
+            if (strlen(point_val_str) > 0) {
+                // 等号后有值，主动设置
+                double set_value = atof(point_val_str);
+                
+                // 查找 device_name
+                const char *device_name = NULL;
+                for (int i = 0; i < g_collector_ctx->target_count; i++) {
+                    if (strcmp(g_collector_ctx->targets[i].point_name, point_name) == 0) {
+                        device_name = g_collector_ctx->targets[i].device_name;
+                        break;
+                    }
+                }
+
+                if (device_name) {
+                    collector_set_point_value(device_name, point_name, set_value);
+                    did_any_set = 1;
+                } else {
+                    HLK_LOG_ERR("[Collector] Handle points down: cannot find device_name for point: %s\n", point_name);
+                }
+            } else {
+                // 等号后无值，主动采集 (不操作，后续只上报)
+            }
+        }
+        token = strtok_r(NULL, "&", &saveptr);
+    }
+    
+    free(value_str);
+
+    if (did_any_set) {
+        usleep(200 * 1000); // 延时200ms让底层写生效
+    }
+
+    // 调用普通的采集上报（全量），如果它返回 1（跳过），则调用我们的即时上报（部分）
+    int report_ret = collector_report_data(g_collector_ctx);
+    if (report_ret == 1) { // 1 表示 skip report
+        collector_report_immediate_data(g_collector_ctx, trace_id, requested_points, req_point_count);
+    }
+
+    for (int i = 0; i < req_point_count; i++) {
+        free(requested_points[i]);
+    }
+}
