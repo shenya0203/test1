@@ -288,6 +288,7 @@ export fn zig_check_shm_inode(fd: c_int, path_c: [*:0]const u8) bool {
 // 定义主函数 main()
 pub fn main() !void {
     const collector_ctx: *modbus_collector.collector_ctx_t = modbus_collector.collector_init();
+    _ = modbus_collector.collector_register_signal_report_handler();
 
     // 调用 C 函数启动MQTT主程序
 
@@ -304,6 +305,9 @@ pub fn main() !void {
     while (true) {
         //std.debug.print("main loop\r\n", .{});
         //modbus_collector.collector_sync_data(collector_ctx);
+        if (modbus_collector.collector_take_signal_report_pending() != 0) {
+            _ = modbus_collector.collector_report_signal_data(collector_ctx);
+        }
         _ = modbus_collector.collector_report_data(collector_ctx);
         // 每秒检查一次，保持进程运行
         _ = sleep(1);

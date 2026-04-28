@@ -293,6 +293,34 @@ int license_set(const license_config_t *config, const char *DN_, const char *PjK
     return 0;
 }
 
+// 清除许可证槽位（出厂测试等）：写满 license_size 为 0，使 license_get 校验失败
+int license_clear(const license_config_t *config)
+{
+    if (!config || config->license_size == 0) {
+        syslog(LOG_ERR, "license_clear: invalid config");
+        return -1;
+    }
+
+    char *storage_buffer = malloc(config->license_size);
+    if (!storage_buffer) {
+        syslog(LOG_ERR, "license_clear: allocation failed");
+        return -1;
+    }
+    memset(storage_buffer, 0, config->license_size);
+
+    int ret = write_mtd_device(storage_buffer, config->license_size,
+                               config->license_offset, config->mtd_device_path);
+    free(storage_buffer);
+
+    if (ret != 0) {
+        syslog(LOG_ERR, "license_clear: MTD write failed");
+        return -1;
+    }
+
+    syslog(LOG_INFO, "License slot cleared successfully");
+    return 0;
+}
+
 // 获取五元组数据
 int license_get(const license_config_t *config, char *DN_, char *PjK_, 
                 char *PdK_, char *PdS_, char *DS_, size_t size_)

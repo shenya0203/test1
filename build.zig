@@ -23,6 +23,13 @@ pub fn build(b: *std.Build) void {
     // 全局调试选项
     const is_debug = b.option(bool, "debug", "Build with debug symbols") orelse false;
 
+    // 版本标识位：bz=标准版，dz=定制版；仅在 `zig build version` 时使用
+    const build_tag = b.option(
+        []const u8,
+        "build_tag",
+        "Build tag identifier: bz (standard) or dz (custom), default bz",
+    ) orelse "bz";
+
     // 定义平台配置列表
     const platforms = [_]PlatformConfig{
         .{
@@ -74,13 +81,14 @@ pub fn build(b: *std.Build) void {
         createPlatformBuildStep(b, platform, mod, is_debug);
     }
 
-    // 生成通用的版本头文件（在默认构建时生成）
-    //const default_version_file = "src/hlk_cloud/src/include/hi_cfm_version.h";
-    //if (std.fs.cwd().statFile(default_version_file)) |_| {
-    //    std.log.info("Default version header already exists: {s}", .{default_version_file});
-    //} else |_| {
-    //    generateVersionHeader(b, "HLK", default_version_file);
-    //}
+    // 版本头文件按需刷新：`zig build version [-Dbuild_tag=bz|dz]`
+    // 一次性重新生成所有平台的 hi_cfm_version_*.h
+    const version_step = b.step(
+        "version",
+        "Regenerate version headers for all platforms (reads VERSION_BASE_VAL from Makefile, uses current system time)",
+    );
+    const version_gen = VersionStep.create(b, build_tag, &platforms);
+    version_step.dependOn(&version_gen.step);
 
     // 默认构建步骤 (用于开发和测试)
     const exe = b.addExecutable(.{
@@ -131,19 +139,8 @@ pub fn build(b: *std.Build) void {
 fn createPlatformBuildStep(b: *std.Build, platform: PlatformConfig, mod: *std.Build.Module, is_debug: bool) void {
     const step = b.step(platform.name, std.fmt.allocPrint(b.allocator, "Build for {s} ({s})", .{ platform.name, platform.product_id }) catch unreachable);
 
-    // 为当前平台生成版本头文件（如果不存在）
-    const version_file_path = std.fmt.allocPrint(b.allocator, "src/hlk_cloud/src/include/hi_cfm_version_{s}.h", .{platform.name}) catch unreachable;
-
-    // 使用 WriteFile 步骤来生成版本头文件，确保只在需要时生成
-    const version_step = b.addWriteFile(version_file_path, "");
-    step.dependOn(&version_step.step);
-
-    // 只有当文件不存在时才生成新的版本头文件
-    if (std.fs.cwd().statFile(version_file_path)) |_| {
-        std.log.info("Version header already exists: {s}", .{version_file_path});
-    } else |_| {
-        generateVersionHeader(b, platform.product_id, version_file_path);
-    }
+    // 注意：版本头文件 hi_cfm_version_{platform}.h 由独立的 `zig build version` 步骤负责刷新，
+    // 这里不再参与生成，平台构建仅消费已存在的头文件。
 
     // 创建可执行文件
     const exe = b.addExecutable(.{
@@ -179,63 +176,190 @@ fn createPlatformBuildStep(b: *std.Build, platform: PlatformConfig, mod: *std.Bu
     step.dependOn(&install.step);
 }
 
-// 生成版本头文件
-fn generateVersionHeader(b: *std.Build, product_id: []const u8, file_path: []const u8) void {
-    // 使用系统命令获取当前日期 (Windows兼容)
-    const result = std.process.Child.run(.{
-        .allocator = b.allocator,
-        .argv = &[_][]const u8{ "powershell", "-Command", "Get-Date -Format 'yyMMdd.HHmmss'" },
-        .cwd = ".",
-    }) catch |err| {
-        std.log.err("Failed to get current date: {}", .{err});
-        // 回退到固定日期
-        const version_content = std.fmt.allocPrint(b.allocator, "#define AT_VERSION \"{s}-1.0.0-{s}\"\n", .{ product_id, "20251222" }) catch unreachable;
+// ============================================================
+// 版本头文件生成 Step
+// 仅在显式运行 `zig build version` 时触发，生成/覆盖所有平台的
+// hi_cfm_version_{platform}.h 文件。
+//
+// 版本字符串格式：
+//     "{product_id}-{VERSION_BASE_VAL}-{build_tag}-{yyMMdd.HHmmss}"
+//   例：
+//     "7628-V1.0.1-bz-251222.233450"
+// ============================================================
+const VersionStep = struct {
+    step: std.Build.Step,
+    build_tag: []const u8,
+    platforms: []PlatformConfig,
 
-        std.fs.cwd().writeFile(.{
-            .sub_path = file_path,
-            .data = version_content,
-        }) catch |write_err| {
-            std.log.err("Failed to write version header file {s}: {}", .{ file_path, write_err });
-            std.process.exit(1);
+    const makefile_path = "src/hlk_cloud/Makefile";
+    const header_dir = "src/hlk_cloud/src/include";
+
+    pub fn create(b: *std.Build, build_tag: []const u8, platforms: []const PlatformConfig) *VersionStep {
+        const self = b.allocator.create(VersionStep) catch @panic("OOM");
+        const owned_platforms = b.allocator.dupe(PlatformConfig, platforms) catch @panic("OOM");
+        self.* = .{
+            .step = std.Build.Step.init(.{
+                .id = .custom,
+                .name = "regenerate version headers",
+                .owner = b,
+                .makeFn = make,
+            }),
+            .build_tag = build_tag,
+            .platforms = owned_platforms,
         };
-        std.log.info("Generated version header: {s}", .{file_path});
-        return;
-    };
-    defer b.allocator.free(result.stdout);
-    defer b.allocator.free(result.stderr);
-
-    if (result.term.Exited != 0) {
-        std.log.err("Command failed with exit code {}", .{result.term.Exited});
-        // 回退到固定日期
-        const version_content = std.fmt.allocPrint(b.allocator, "#define AT_VERSION \"{s}-1.0.0-{s}\"\n", .{ product_id, "20251222" }) catch unreachable;
-
-        std.fs.cwd().writeFile(.{
-            .sub_path = file_path,
-            .data = version_content,
-        }) catch |write_err| {
-            std.log.err("Failed to write version header file {s}: {}", .{ file_path, write_err });
-            std.process.exit(1);
-        };
-        std.log.info("Generated version header: {s}", .{file_path});
-        return;
+        return self;
     }
 
-    // 移除换行符和空格
-    const date_str_raw = std.mem.trim(u8, result.stdout, " \t\r\n");
-    const date_str = std.fmt.allocPrint(b.allocator, "{s}", .{date_str_raw}) catch unreachable;
+    fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!void {
+        _ = options;
+        const self: *VersionStep = @fieldParentPtr("step", step);
+        const b = step.owner;
+        const allocator = b.allocator;
 
-    // 生成版本字符串
-    const version_content = std.fmt.allocPrint(b.allocator, "#define AT_VERSION \"{s}-1.0.0-{s}\"\n", .{ product_id, date_str }) catch unreachable;
+        // 校验 build_tag 必须为 bz 或 dz
+        if (!std.mem.eql(u8, self.build_tag, "bz") and !std.mem.eql(u8, self.build_tag, "dz")) {
+            std.log.err("Invalid -Dbuild_tag='{s}', only 'bz' (standard) or 'dz' (custom) are allowed", .{self.build_tag});
+            return error.InvalidBuildTag;
+        }
 
-    // 直接写入文件
-    std.fs.cwd().writeFile(.{
-        .sub_path = file_path,
-        .data = version_content,
-    }) catch |err| {
-        std.log.err("Failed to write version header file {s}: {}", .{ file_path, err });
-        std.process.exit(1);
+        // 1. 从 Makefile 读取 VERSION_BASE_VAL
+        const makefile_content = readFileToEndAlloc(allocator, makefile_path, 1 * 1024 * 1024) catch |err| {
+            std.log.err("Failed to read {s}: {}", .{ makefile_path, err });
+            return err;
+        };
+        defer allocator.free(makefile_content);
+
+        const version_base = extractVersionBase(allocator, makefile_content) catch |err| {
+            std.log.err("Failed to extract VERSION_BASE_VAL from {s}: {}", .{ makefile_path, err });
+            return err;
+        };
+        defer allocator.free(version_base);
+
+        // 2. 获取当前日期时间（yyMMdd.HHmmss）
+        const date_str = try getCurrentDateTime(allocator);
+        defer allocator.free(date_str);
+
+        std.log.info(
+            "Generating version headers: base={s}, tag={s}, time={s}",
+            .{ version_base, self.build_tag, date_str },
+        );
+
+        // 3. 为每个平台写入 hi_cfm_version_{platform}.h
+        for (self.platforms) |platform| {
+            const file_path = try std.fmt.allocPrint(
+                allocator,
+                "{s}/hi_cfm_version_{s}.h",
+                .{ header_dir, platform.name },
+            );
+            defer allocator.free(file_path);
+
+            const content = try std.fmt.allocPrint(
+                allocator,
+                "#define AT_VERSION \"{s}-{s}-{s}-{s}\"\n",
+                .{ platform.product_id, version_base, self.build_tag, date_str },
+            );
+            defer allocator.free(content);
+
+            std.fs.cwd().writeFile(.{
+                .sub_path = file_path,
+                .data = content,
+            }) catch |err| {
+                std.log.err("Failed to write {s}: {}", .{ file_path, err });
+                return err;
+            };
+
+            std.log.info("  -> {s}: {s}", .{ file_path, std.mem.trimRight(u8, content, "\r\n") });
+        }
+    }
+};
+
+// 读取整个文件到堆上分配的缓冲区。
+// 使用最底层的 file.read 循环实现，避免依赖跨 Zig 版本变动频繁的高层 API：
+//   - std.fs.Dir.readFileAlloc: 参数顺序/类型在 0.14→0.15 变过
+//   - std.fs.File.readAll: 在 Zig 0.16-dev Io 重构中被移除
+fn readFileToEndAlloc(allocator: std.mem.Allocator, path: []const u8, max_bytes: usize) ![]u8 {
+    var file = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+
+    const stat = try file.stat();
+    if (stat.size > max_bytes) return error.FileTooBig;
+
+    const size: usize = @intCast(stat.size);
+    const buf = try allocator.alloc(u8, size);
+    errdefer allocator.free(buf);
+
+    var pos: usize = 0;
+    while (pos < size) {
+        const n = try file.read(buf[pos..]);
+        if (n == 0) return error.UnexpectedEndOfFile;
+        pos += n;
+    }
+    return buf;
+}
+
+// 从 Makefile 文本中提取 `VERSION_BASE_VAL := <value>` 的值
+// 支持 `:=`、`=`、`?=` 三种赋值形式，忽略行内注释（`#` 之后的内容）
+fn extractVersionBase(allocator: std.mem.Allocator, content: []const u8) ![]u8 {
+    const key = "VERSION_BASE_VAL";
+    var iter = std.mem.splitScalar(u8, content, '\n');
+    while (iter.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (!std.mem.startsWith(u8, line, key)) continue;
+
+        var rest = std.mem.trim(u8, line[key.len..], " \t");
+        if (std.mem.startsWith(u8, rest, ":=")) {
+            rest = rest[2..];
+        } else if (std.mem.startsWith(u8, rest, "?=")) {
+            rest = rest[2..];
+        } else if (std.mem.startsWith(u8, rest, "=")) {
+            rest = rest[1..];
+        } else {
+            continue;
+        }
+
+        // 去掉行内注释
+        if (std.mem.indexOfScalar(u8, rest, '#')) |hash_idx| {
+            rest = rest[0..hash_idx];
+        }
+        rest = std.mem.trim(u8, rest, " \t");
+        if (rest.len == 0) continue;
+
+        return try allocator.dupe(u8, rest);
+    }
+    return error.VersionBaseNotFound;
+}
+
+// 获取当前系统时间，格式 yyMMdd.HHmmss（例 251222.233450）
+// Windows 使用 PowerShell Get-Date，其他系统使用 date 命令
+fn getCurrentDateTime(allocator: std.mem.Allocator) ![]u8 {
+    const argv: []const []const u8 = switch (builtin.os.tag) {
+        .windows => &[_][]const u8{ "powershell", "-NoProfile", "-Command", "Get-Date -Format 'yyMMdd.HHmmss'" },
+        else => &[_][]const u8{ "date", "+%y%m%d.%H%M%S" },
     };
-    std.log.info("Generated version header: {s}", .{file_path});
+
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = argv,
+    }) catch |err| {
+        std.log.err("Failed to run datetime command: {}", .{err});
+        return err;
+    };
+    defer allocator.free(result.stderr);
+    errdefer allocator.free(result.stdout);
+
+    if (result.term != .Exited or result.term.Exited != 0) {
+        std.log.err(
+            "Datetime command failed: term={any}, stderr={s}",
+            .{ result.term, result.stderr },
+        );
+        allocator.free(result.stdout);
+        return error.DatetimeCommandFailed;
+    }
+
+    const trimmed = std.mem.trim(u8, result.stdout, " \t\r\n");
+    const owned = try allocator.dupe(u8, trimmed);
+    allocator.free(result.stdout);
+    return owned;
 }
 
 // 添加C源文件

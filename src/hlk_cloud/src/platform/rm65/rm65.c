@@ -25,6 +25,11 @@ int cfmGetLicense_RM65(char *DN_, char *PjK_, char *PdK_, char *PdS_, char *DS_,
     return license_get(&rm65_license_config, DN_, PjK_, PdK_, PdS_, DS_, size_);
 }
 
+int cfmClearLicense_RM65(void)
+{
+    return license_clear(&rm65_license_config);
+}
+
 #if 0
 int cfmGetLicense_RM65(char *DN_,char *PjK_,char *PdK_,char *PdS_,char *DS_, size_t size_)
 {

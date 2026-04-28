@@ -9,6 +9,7 @@
 #include <dirent.h> // 新增：用于目录遍历
 #include <time.h>   // 新增：用于时间戳
 #include <sys/types.h> // 新增：用于 mkdir
+#include <signal.h>
 #include "cJSON.h"
 #include "app_api.h"
 #include "data_collector.h"
@@ -19,6 +20,14 @@
 
 // 全局上下文指针，供MQTT回调和UBUS使用
 collector_ctx_t *g_collector_ctx = NULL;
+static volatile sig_atomic_t g_signal_report_pending = 0;
+
+static void collector_signal_report_handler(int signo)
+{
+    if (signo == SIGUSR1) {
+        g_signal_report_pending = 1;
+    }
+}
 
 // 共享内存定义保持不变...
 #define MODBUS_SHM_NAME "/modbus_shm"
@@ -1073,20 +1082,14 @@ static char* prepare_report_data(collector_ctx_t *ctx)
 }
 
 
-// 独立的Cloud数据上报接口
-int collector_report_data(collector_ctx_t *ctx)
+static int collector_do_report_data(collector_ctx_t *ctx, const char *reason)
 {
     if (!ctx) {
         HLK_LOG_ERR("[Collector] Report error: invalid context\n");
         return -1;
     }
 
-    // 检查是否需要上报
-    if (!should_report_data(ctx)) {
-        //printf("[Collector] Skip report: conditions not met\n");
-        return 1; // 1 表示 skip
-    }
-    HLK_LOG_INFO("[Collector] should_report_data: 1\n");
+    HLK_LOG_INFO("[Collector] Start report, reason: %s\n", reason ? reason : "unknown");
     collector_sync_data(ctx);
 
     // ==========================================
@@ -1150,6 +1153,50 @@ int collector_report_data(collector_ctx_t *ctx)
     free(report_data);
 
     return realtime_send_success ? 0 : -1;
+}
+
+// 独立的Cloud数据上报接口
+int collector_report_data(collector_ctx_t *ctx)
+{
+    if (!ctx) {
+        HLK_LOG_ERR("[Collector] Report error: invalid context\n");
+        return -1;
+    }
+
+    // 检查是否需要上报
+    if (!should_report_data(ctx)) {
+        //printf("[Collector] Skip report: conditions not met\n");
+        return 1; // 1 表示 skip
+    }
+    HLK_LOG_INFO("[Collector] should_report_data: 1\n");
+
+    return collector_do_report_data(ctx, "period_or_timed");
+}
+
+int collector_report_signal_data(collector_ctx_t *ctx)
+{
+    return collector_do_report_data(ctx, "SIGUSR1");
+}
+
+int collector_register_signal_report_handler(void)
+{
+    if (signal(SIGUSR1, collector_signal_report_handler) == SIG_ERR) {
+        HLK_LOG_ERR("[Collector] Failed to register SIGUSR1 handler: %s\n", strerror(errno));
+        return -1;
+    }
+
+    HLK_LOG_INFO("[Collector] SIGUSR1 report handler registered\n");
+    return 0;
+}
+
+int collector_take_signal_report_pending(void)
+{
+    if (g_signal_report_pending) {
+        g_signal_report_pending = 0;
+        return 1;
+    }
+
+    return 0;
 }
 
 void collector_destroy(collector_ctx_t *ctx) 

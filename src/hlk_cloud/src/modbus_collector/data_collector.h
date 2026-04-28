@@ -107,6 +107,9 @@ void collector_sync_data(collector_ctx_t *ctx);
 
 // 新增：独立的上报接口，对接私有云接口
 int collector_report_data(collector_ctx_t *ctx);
+int collector_report_signal_data(collector_ctx_t *ctx);
+int collector_register_signal_report_handler(void);
+int collector_take_signal_report_pending(void);
 
 void collector_destroy(collector_ctx_t *ctx);
 

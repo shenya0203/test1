@@ -16,6 +16,7 @@ typedef struct {
 // 通用函数声明
 int license_set(const license_config_t *config, const char *DN_, const char *PjK_, 
                 const char *PdK_, const char *PdS_, const char *DS_);
+int license_clear(const license_config_t *config);
 int license_get(const license_config_t *config, char *DN_, char *PjK_, 
                 char *PdK_, char *PdS_, char *DS_, size_t size_);
 

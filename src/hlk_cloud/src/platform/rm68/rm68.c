@@ -24,3 +24,8 @@ int cfmGetLicense_RM68(char *DN_, char *PjK_, char *PdK_, char *PdS_, char *DS_,
 {
     return license_get(&rm68_license_config, DN_, PjK_, PdK_, PdS_, DS_, size_);
 }
+
+int cfmClearLicense_RM68(void)
+{
+    return license_clear(&rm68_license_config);
+}

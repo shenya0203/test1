@@ -24,3 +24,8 @@ int cfmGetLicense_mt7628(char *DN_, char *PjK_, char *PdK_, char *PdS_, char *DS
 {
     return license_get(&mt7628_license_config, DN_, PjK_, PdK_, PdS_, DS_, size_);
 }
+
+int cfmClearLicense_mt7628(void)
+{
+    return license_clear(&mt7628_license_config);
+}

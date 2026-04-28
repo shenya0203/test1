@@ -11,5 +11,6 @@
 // 函数声明
 extern int cfmGetLicense_RM68(char *DN_, char *PjK_, char *PdK_, char *PdS_, char *DS_, size_t size_);
 extern int cfmSetLicense_RM68(const char *DN_, const char *PjK_, const char *PdK_, const char *PdS_, const char *DS_);
+extern int cfmClearLicense_RM68(void);
 
 #endif
