@@ -123,6 +123,7 @@ int __lstat_time64(const char *path, struct stat *st) {
 #include "hi_link_ipc.h"         // IPC相关定义
 #include "app_api.h"             // Zig实现的函数声明
 #include "app_api.h"             // 应用程序API
+#include <stdint.h>
 #ifdef HLK_PRODUCT_WR10
 #include "igdCmApi.h"            // 网关管理API
 #endif
@@ -159,6 +160,17 @@ typedef struct {
     char error_msg[256];    // 错误信息
 } ota_download_result_t;
 
+typedef struct {
+    int initialized;
+    char iccid[32];
+    unsigned long long last_rx_bytes;
+    unsigned long long last_tx_bytes;
+    unsigned long long total_rx_bytes;
+    unsigned long long total_tx_bytes;
+    unsigned long long last_sample_uptime;
+    unsigned long long next_report_uptime;
+} SIM_TRAFFIC_STATE_S;
+
 // 定义内存结构体用于存储HTTP响应数据
 struct MemoryStruct {
     char *memory;
@@ -167,6 +179,19 @@ struct MemoryStruct {
 
 // 定义下载超时时间（秒）
 #define OTA_DOWNLOAD_TIMEOUT 1800  // 30分钟
+
+// 内置eSIM流量统计配置：运行期状态只写入/tmp，避免磨损Flash
+#define SIM_TRAFFIC_INTERFACE "eth1"
+#define SIM_TRAFFIC_RX_BYTES_PATH "/sys/class/net/" SIM_TRAFFIC_INTERFACE "/statistics/rx_bytes"
+#define SIM_TRAFFIC_TX_BYTES_PATH "/sys/class/net/" SIM_TRAFFIC_INTERFACE "/statistics/tx_bytes"
+#define SIM_TRAFFIC_UPTIME_PATH "/proc/uptime"
+#define SIM_TRAFFIC_STATE_PATH "/tmp/hlk_sim_traffic_state.json"
+#define SIM_TRAFFIC_SAMPLE_INTERVAL_SEC 60
+#define SIM_TRAFFIC_REPORT_MIN_INTERVAL_SEC (15 * 60)
+#define SIM_TRAFFIC_REPORT_MAX_INTERVAL_SEC (30 * 60)
+#define SIM_TRAFFIC_COUNTER_MAX 0xFFFFFFFFULL
+#define SIM_TRAFFIC_MAX_BYTES_PER_SEC (3ULL * 1024ULL * 1024ULL)
+#define SIM_TRAFFIC_STATE_VERSION 2
 
 /*****************************************************************************
  * 测试使用的私有云设备信息（用于开发调试阶段）
@@ -217,6 +242,7 @@ extern void hlk_mqtt_handle_data_points_down(cJSON *root);   //在data_collector
 
 // 全局变量定义
 static int g_mqtt_flag = 0;           // MQTT连接状态标志位
+static SIM_TRAFFIC_STATE_S g_sim_traffic_state = {0};
 MQTT_USER_CERT_S mqtt_user_cert = {0}; // MQTT用户认证信息结构体
 
 // MQTT和WebAPI地址全局变量
@@ -448,6 +474,432 @@ int hlk_mqtt_publish(char *topic, int qos, void *data, int len)
 
     // 调用MQTT库发布消息
     return MQTTPublish(hlk_iot.client, topic, &pubmsg);
+}
+
+static int sim_traffic_get_uptime(unsigned long long *uptime_sec);
+
+static void sim_traffic_random_seed_once(void)
+{
+    static int seeded = 0;
+    unsigned long long uptime_sec = 0;
+
+    if (!seeded) {
+        sim_traffic_get_uptime(&uptime_sec);
+        srand((unsigned int)uptime_sec ^ (unsigned int)getpid());
+        seeded = 1;
+    }
+}
+
+static int sim_traffic_next_report_interval(void)
+{
+    int range;
+
+    sim_traffic_random_seed_once();
+    range = SIM_TRAFFIC_REPORT_MAX_INTERVAL_SEC - SIM_TRAFFIC_REPORT_MIN_INTERVAL_SEC + 1;
+    return SIM_TRAFFIC_REPORT_MIN_INTERVAL_SEC + (rand() % range);
+}
+
+static int sim_traffic_get_uptime(unsigned long long *uptime_sec)
+{
+    FILE *fp = NULL;
+    char buf[64] = {0};
+    double uptime;
+
+    if (uptime_sec == NULL) {
+        return -1;
+    }
+
+    fp = fopen(SIM_TRAFFIC_UPTIME_PATH, "r");
+    if (fp == NULL) {
+        HLK_LOG_ERR("[SIM_TRAFFIC] open %s failed: %s\n", SIM_TRAFFIC_UPTIME_PATH, strerror(errno));
+        return -1;
+    }
+
+    if (fgets(buf, sizeof(buf), fp) == NULL) {
+        HLK_LOG_ERR("[SIM_TRAFFIC] read %s failed\n", SIM_TRAFFIC_UPTIME_PATH);
+        fclose(fp);
+        return -1;
+    }
+    fclose(fp);
+
+    uptime = strtod(buf, NULL);
+    if (uptime < 0) {
+        return -1;
+    }
+
+    *uptime_sec = (unsigned long long)uptime;
+    return 0;
+}
+
+static int sim_traffic_read_counter(const char *path, unsigned long long *value)
+{
+    FILE *fp = NULL;
+    char buf[64] = {0};
+    unsigned long long counter;
+
+    if (path == NULL || value == NULL) {
+        return -1;
+    }
+
+    fp = fopen(path, "r");
+    if (fp == NULL) {
+        HLK_LOG_ERR("[SIM_TRAFFIC] open %s failed: %s\n", path, strerror(errno));
+        return -1;
+    }
+
+    if (fgets(buf, sizeof(buf), fp) == NULL) {
+        HLK_LOG_ERR("[SIM_TRAFFIC] read %s failed\n", path);
+        fclose(fp);
+        return -1;
+    }
+    fclose(fp);
+
+    counter = strtoull(buf, NULL, 10);
+    *value = counter & SIM_TRAFFIC_COUNTER_MAX;
+    return 0;
+}
+
+static int sim_traffic_read_interface(unsigned long long *rx_bytes, unsigned long long *tx_bytes)
+{
+    if (sim_traffic_read_counter(SIM_TRAFFIC_RX_BYTES_PATH, rx_bytes) != 0) {
+        return -1;
+    }
+
+    if (sim_traffic_read_counter(SIM_TRAFFIC_TX_BYTES_PATH, tx_bytes) != 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static unsigned long long sim_traffic_calc_delta(unsigned long long current,
+                                                 unsigned long long last,
+                                                 unsigned long long elapsed_sec)
+{
+    unsigned long long wrapped_delta;
+    unsigned long long max_reasonable_delta;
+
+    current &= SIM_TRAFFIC_COUNTER_MAX;
+    last &= SIM_TRAFFIC_COUNTER_MAX;
+
+    if (current >= last) {
+        return current - last;
+    }
+
+    wrapped_delta = (SIM_TRAFFIC_COUNTER_MAX - last) + current + 1ULL;
+    max_reasonable_delta = elapsed_sec * SIM_TRAFFIC_MAX_BYTES_PER_SEC;
+
+    if (elapsed_sec > 0 && wrapped_delta > max_reasonable_delta) {
+        HLK_LOG_ERR("[SIM_TRAFFIC] counter reset suspected last=%llu current=%llu delta=%llu\n",
+                    last, current, wrapped_delta);
+        return current;
+    }
+
+    return wrapped_delta;
+}
+
+static int sim_traffic_load_state(SIM_TRAFFIC_STATE_S *state)
+{
+    FILE *fp = NULL;
+    char buf[1024] = {0};
+    size_t read_len;
+    cJSON *root = NULL;
+    cJSON *item = NULL;
+
+    if (state == NULL) {
+        return -1;
+    }
+
+    fp = fopen(SIM_TRAFFIC_STATE_PATH, "r");
+    if (fp == NULL) {
+        return -1;
+    }
+
+    read_len = fread(buf, 1, sizeof(buf) - 1, fp);
+    fclose(fp);
+    if (read_len == 0) {
+        return -1;
+    }
+    buf[read_len] = '\0';
+
+    root = cJSON_Parse(buf);
+    if (root == NULL) {
+        return -1;
+    }
+
+    item = cJSON_GetObjectItem(root, "Version");
+    if (!cJSON_IsNumber(item) || item->valueint != SIM_TRAFFIC_STATE_VERSION) {
+        cJSON_Delete(root);
+        return -1;
+    }
+
+    memset(state, 0, sizeof(*state));
+    item = cJSON_GetObjectItem(root, "ICCID");
+    if (cJSON_IsString(item) && item->valuestring != NULL) {
+        snprintf(state->iccid, sizeof(state->iccid), "%s", item->valuestring);
+    }
+
+    item = cJSON_GetObjectItem(root, "LastRxBytes");
+    if (cJSON_IsNumber(item)) {
+        state->last_rx_bytes = (unsigned long long)item->valuedouble;
+    }
+    item = cJSON_GetObjectItem(root, "LastTxBytes");
+    if (cJSON_IsNumber(item)) {
+        state->last_tx_bytes = (unsigned long long)item->valuedouble;
+    }
+    item = cJSON_GetObjectItem(root, "TotalRxBytes");
+    if (cJSON_IsNumber(item)) {
+        state->total_rx_bytes = (unsigned long long)item->valuedouble;
+    }
+    item = cJSON_GetObjectItem(root, "TotalTxBytes");
+    if (cJSON_IsNumber(item)) {
+        state->total_tx_bytes = (unsigned long long)item->valuedouble;
+    }
+    item = cJSON_GetObjectItem(root, "LastSampleUptime");
+    if (cJSON_IsNumber(item)) {
+        state->last_sample_uptime = (unsigned long long)item->valuedouble;
+    }
+    item = cJSON_GetObjectItem(root, "NextReportUptime");
+    if (cJSON_IsNumber(item)) {
+        state->next_report_uptime = (unsigned long long)item->valuedouble;
+    }
+
+    state->initialized = 1;
+    cJSON_Delete(root);
+    return 0;
+}
+
+static int sim_traffic_save_state(const SIM_TRAFFIC_STATE_S *state)
+{
+    FILE *fp = NULL;
+    cJSON *root = NULL;
+    char *str = NULL;
+    int ret = -1;
+
+    if (state == NULL || !state->initialized) {
+        return -1;
+    }
+
+    root = cJSON_CreateObject();
+    if (root == NULL) {
+        return -1;
+    }
+
+    cJSON_AddNumberToObject(root, "Version", SIM_TRAFFIC_STATE_VERSION);
+    cJSON_AddStringToObject(root, "ICCID", state->iccid);
+    cJSON_AddStringToObject(root, "Interface", SIM_TRAFFIC_INTERFACE);
+    cJSON_AddNumberToObject(root, "CounterBits", 32);
+    cJSON_AddNumberToObject(root, "LastRxBytes", (double)state->last_rx_bytes);
+    cJSON_AddNumberToObject(root, "LastTxBytes", (double)state->last_tx_bytes);
+    cJSON_AddNumberToObject(root, "TotalRxBytes", (double)state->total_rx_bytes);
+    cJSON_AddNumberToObject(root, "TotalTxBytes", (double)state->total_tx_bytes);
+    cJSON_AddNumberToObject(root, "LastSampleUptime", (double)state->last_sample_uptime);
+    cJSON_AddNumberToObject(root, "NextReportUptime", (double)state->next_report_uptime);
+
+    str = cJSON_PrintUnformatted(root);
+    if (str == NULL) {
+        goto exit;
+    }
+    HLK_LOG_DEBUG("[SIM_TRAFFIC] save state: %s\n", str);
+
+    fp = fopen(SIM_TRAFFIC_STATE_PATH, "w");
+    if (fp == NULL) {
+        HLK_LOG_ERR("[SIM_TRAFFIC] open %s failed: %s\n", SIM_TRAFFIC_STATE_PATH, strerror(errno));
+        goto exit;
+    }
+
+    if (fputs(str, fp) >= 0) {
+        ret = 0;
+    }
+    fclose(fp);
+
+exit:
+    if (str) {
+        free(str);
+    }
+    if (root) {
+        cJSON_Delete(root);
+    }
+    return ret;
+}
+
+static int sim_traffic_init(unsigned long long uptime_sec)
+{
+    unsigned long long rx_bytes = 0;
+    unsigned long long tx_bytes = 0;
+    SIM_TRAFFIC_STATE_S cached_state = {0};
+    char iccid[32] = {0};
+
+    if (g_sim_traffic_state.initialized) {
+        return 0;
+    }
+
+    if (get_iccid_info(iccid) == NULL) {
+        HLK_LOG_ERR("[SIM_TRAFFIC] ICCID not ready, wait next cycle\n");
+        return -1;
+    }
+
+    if (sim_traffic_read_interface(&rx_bytes, &tx_bytes) != 0) {
+        return -1;
+    }
+
+    if (sim_traffic_load_state(&cached_state) == 0 &&
+        strcmp(cached_state.iccid, iccid) == 0) {
+        if (cached_state.last_sample_uptime > uptime_sec) {
+            HLK_LOG_ERR("[SIM_TRAFFIC] stale uptime state ignored last=%llu current=%llu\n",
+                        cached_state.last_sample_uptime, uptime_sec);
+            goto init_new_state;
+        }
+
+        g_sim_traffic_state = cached_state;
+        if (g_sim_traffic_state.next_report_uptime <= uptime_sec) {
+            g_sim_traffic_state.next_report_uptime = uptime_sec + sim_traffic_next_report_interval();
+        }
+        HLK_LOG_INFO("[SIM_TRAFFIC] load state from %s\n", SIM_TRAFFIC_STATE_PATH);
+        return 0;
+    }
+
+init_new_state:
+    memset(&g_sim_traffic_state, 0, sizeof(g_sim_traffic_state));
+    g_sim_traffic_state.initialized = 1;
+    snprintf(g_sim_traffic_state.iccid, sizeof(g_sim_traffic_state.iccid), "%s", iccid);
+    g_sim_traffic_state.last_rx_bytes = rx_bytes;
+    g_sim_traffic_state.last_tx_bytes = tx_bytes;
+    g_sim_traffic_state.last_sample_uptime = uptime_sec;
+    g_sim_traffic_state.next_report_uptime = uptime_sec + sim_traffic_next_report_interval();
+    sim_traffic_save_state(&g_sim_traffic_state);
+
+    HLK_LOG_INFO("[SIM_TRAFFIC] init rx=%llu tx=%llu next_report_uptime=%llu\n",
+                 rx_bytes, tx_bytes, g_sim_traffic_state.next_report_uptime);
+    return 0;
+}
+
+static int sim_traffic_sample(unsigned long long uptime_sec)
+{
+    unsigned long long rx_bytes = 0;
+    unsigned long long tx_bytes = 0;
+    unsigned long long rx_delta;
+    unsigned long long tx_delta;
+    unsigned long long elapsed_sec;
+
+    if (sim_traffic_read_interface(&rx_bytes, &tx_bytes) != 0) {
+        return -1;
+    }
+
+    elapsed_sec = uptime_sec - g_sim_traffic_state.last_sample_uptime;
+    if (elapsed_sec == 0) {
+        elapsed_sec = SIM_TRAFFIC_SAMPLE_INTERVAL_SEC;
+    }
+
+    rx_delta = sim_traffic_calc_delta(rx_bytes, g_sim_traffic_state.last_rx_bytes, elapsed_sec);
+    tx_delta = sim_traffic_calc_delta(tx_bytes, g_sim_traffic_state.last_tx_bytes, elapsed_sec);
+
+    g_sim_traffic_state.total_rx_bytes += rx_delta;
+    g_sim_traffic_state.total_tx_bytes += tx_delta;
+    g_sim_traffic_state.last_rx_bytes = rx_bytes;
+    g_sim_traffic_state.last_tx_bytes = tx_bytes;
+    g_sim_traffic_state.last_sample_uptime = uptime_sec;
+    sim_traffic_save_state(&g_sim_traffic_state);
+
+    HLK_LOG_INFO("[SIM_TRAFFIC] sample rx_delta=%llu tx_delta=%llu total=%llu\n",
+                 rx_delta, tx_delta,
+                 g_sim_traffic_state.total_rx_bytes + g_sim_traffic_state.total_tx_bytes);
+    return 0;
+}
+
+static int sim_traffic_report(void)
+{
+    cJSON *root = NULL;
+    cJSON *items_array = NULL;
+    cJSON *item = NULL;
+    char *str = NULL;
+    unsigned long long total_bytes;
+    int ret = -1;
+
+    root = cJSON_CreateObject();
+    items_array = cJSON_CreateArray();
+    item = cJSON_CreateObject();
+    if (root == NULL || items_array == NULL || item == NULL) {
+        goto exit;
+    }
+
+    total_bytes = g_sim_traffic_state.total_rx_bytes + g_sim_traffic_state.total_tx_bytes;
+    cJSON_AddStringToObject(root, "DeviceCode", mqtt_user_cert.deviceName);
+    cJSON_AddNumberToObject(item, "Time", (double)zig_get_timestamp());
+    cJSON_AddStringToObject(item, "Name", "SIMTrafficUsed");
+    cJSON_AddNumberToObject(item, "Value", (double)total_bytes);
+    cJSON_AddStringToObject(item, "ICCID", g_sim_traffic_state.iccid);
+    cJSON_AddStringToObject(item, "Interface", SIM_TRAFFIC_INTERFACE);
+    cJSON_AddNumberToObject(item, "RxBytes", (double)g_sim_traffic_state.total_rx_bytes);
+    cJSON_AddNumberToObject(item, "TxBytes", (double)g_sim_traffic_state.total_tx_bytes);
+    cJSON_AddNumberToObject(item, "CounterBits", 32);
+    cJSON_AddItemToArray(items_array, item);
+    item = NULL;
+    cJSON_AddItemToObject(root, "Items", items_array);
+    items_array = NULL;
+
+    str = cJSON_PrintUnformatted(root);
+    if (str == NULL) {
+        goto exit;
+    }
+
+    ret = hlk_mqtt_publish(mqtt_topic_type_table[TOPIC_POST].topic, QOS0, str, strlen(str));
+    if (ret == SUCCESS) {
+        HLK_LOG_INFO("[SIM_TRAFFIC] report ok total=%llu\n", total_bytes);
+    } else {
+        HLK_LOG_ERR("[SIM_TRAFFIC] report failed ret=%d\n", ret);
+    }
+
+exit:
+    if (str) {
+        free(str);
+    }
+    if (item) {
+        cJSON_Delete(item);
+    }
+    if (items_array) {
+        cJSON_Delete(items_array);
+    }
+    if (root) {
+        cJSON_Delete(root);
+    }
+    return ret;
+}
+
+static void sim_traffic_process(void)
+{
+    unsigned long long uptime_sec = 0;
+
+    if (sim_traffic_get_uptime(&uptime_sec) != 0) {
+        return;
+    }
+
+    if (sim_traffic_init(uptime_sec) != 0) {
+        return;
+    }
+
+    if (g_sim_traffic_state.last_sample_uptime > uptime_sec) {
+        HLK_LOG_ERR("[SIM_TRAFFIC] uptime moved backwards, reset runtime traffic state\n");
+        g_sim_traffic_state.initialized = 0;
+        sim_traffic_init(uptime_sec);
+        return;
+    }
+
+    if (g_sim_traffic_state.last_sample_uptime == 0 ||
+        uptime_sec - g_sim_traffic_state.last_sample_uptime >= SIM_TRAFFIC_SAMPLE_INTERVAL_SEC) {
+        sim_traffic_sample(uptime_sec);
+    }
+
+    if (g_sim_traffic_state.next_report_uptime == 0) {
+        g_sim_traffic_state.next_report_uptime = uptime_sec + sim_traffic_next_report_interval();
+        sim_traffic_save_state(&g_sim_traffic_state);
+    }
+
+    if (uptime_sec >= g_sim_traffic_state.next_report_uptime) {
+        sim_traffic_report();
+        g_sim_traffic_state.next_report_uptime = uptime_sec + sim_traffic_next_report_interval();
+        sim_traffic_save_state(&g_sim_traffic_state);
+    }
 }
 
 /******************************************************************************
@@ -2079,6 +2531,7 @@ int hlk_MQTTYield(SHARED_DATA_S *sharedData)
     mqtt_subscribe_parse();   // 订阅所有需要的MQTT主题
     hlk_mqtt_ping(IS_START);         // 发送第一个心跳包
     hlk_ota_check_version(); // 检查是否有待处理的OTA升级
+    sim_traffic_process(); // 初始化运行期SIM流量统计
     
     // MQTT消息处理主循环
     while (1)
@@ -2102,6 +2555,8 @@ int hlk_MQTTYield(SHARED_DATA_S *sharedData)
             time_start = time_ping;  // 更新心跳时间基准
             hlk_mqtt_ping(0);         // 发送心跳包
         }
+
+        sim_traffic_process(); // 基于/proc/uptime每分钟采样，15~30分钟随机上报
 
         // 主循环休眠1秒，避免CPU占用过高
         app_msleep(1000);

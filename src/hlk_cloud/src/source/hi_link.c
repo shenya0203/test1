@@ -487,7 +487,7 @@ conn:
 	
 	/* 设置保活间隔时间 */
   	if(mqtt_user_cert.keepalive == 0)
-  		data.keepAliveInterval = 10;    /* 默认保活间隔10秒 */
+  		data.keepAliveInterval = 60;    /* 默认保活间隔10秒 */
 	else
 		data.keepAliveInterval = mqtt_user_cert.keepalive;  /* 使用配置的保活间隔 */
 	
