@@ -39,6 +39,7 @@
 #include "hlk_log.h"        // 日志相关头文件
 #include "app_api.h"        // 应用API头文件
 #include "hi_mqtt.h"        // MQTT协议相关头文件
+#include "cJSON.h"          // JSON解析库
 
 extern void zig_msleep(unsigned int msec);
 
@@ -79,6 +80,16 @@ extern void zig_msleep(unsigned int msec);
  */
 #define MAX_LINES 500
 
+/**
+ * @brief 蜂窝模组信息文件路径
+ */
+#define MODEM_INFO_JSON_PATH "/tmp/modem_info.json"
+
+/**
+ * @brief 蜂窝模组字段最大长度
+ */
+#define MODEM_INFO_VALUE_LEN 32
+
 /*****************************************************************************
  *                                类型定义                                    *
  *****************************************************************************/
@@ -87,7 +98,189 @@ extern void zig_msleep(unsigned int msec);
 /*****************************************************************************
  *                                局部变量                                    *
  *****************************************************************************/
-// 此处可添加模块内部使用的静态变量
+static int g_modem_info_loaded = 0;
+static int g_modem_imei_valid = 0;
+static int g_modem_iccid_valid = 0;
+static int g_modem_imsi_valid = 0;
+static char g_modem_imei[MODEM_INFO_VALUE_LEN] = {0};
+static char g_modem_iccid[MODEM_INFO_VALUE_LEN] = {0};
+static char g_modem_imsi[MODEM_INFO_VALUE_LEN] = {0};
+
+static int modem_info_strcasecmp(const char *left, const char *right)
+{
+    unsigned char left_ch;
+    unsigned char right_ch;
+
+    if (left == NULL || right == NULL) {
+        return -1;
+    }
+
+    while (*left != '\0' && *right != '\0') {
+        left_ch = (unsigned char)*left;
+        right_ch = (unsigned char)*right;
+
+        if (left_ch >= 'A' && left_ch <= 'Z') {
+            left_ch = left_ch - 'A' + 'a';
+        }
+
+        if (right_ch >= 'A' && right_ch <= 'Z') {
+            right_ch = right_ch - 'A' + 'a';
+        }
+
+        if (left_ch != right_ch) {
+            return (int)left_ch - (int)right_ch;
+        }
+
+        left++;
+        right++;
+    }
+
+    return (int)(unsigned char)*left - (int)(unsigned char)*right;
+}
+
+static int modem_info_is_space(char ch)
+{
+    return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n';
+}
+
+static int modem_info_value_is_valid(const char *value)
+{
+    const char *start = value;
+    const char *end;
+    size_t len;
+    char temp[MODEM_INFO_VALUE_LEN] = {0};
+
+    if (value == NULL) {
+        return 0;
+    }
+
+    while (modem_info_is_space(*start)) {
+        start++;
+    }
+
+    if (*start == '\0') {
+        return 0;
+    }
+
+    end = start + strlen(start);
+    while (end > start && modem_info_is_space(*(end - 1))) {
+        end--;
+    }
+
+    len = (size_t)(end - start);
+    if (len == 0 || len >= sizeof(temp)) {
+        return 0;
+    }
+
+    memcpy(temp, start, len);
+    temp[len] = '\0';
+
+    if (modem_info_strcasecmp(temp, "N/A") == 0 ||
+        modem_info_strcasecmp(temp, "NA") == 0 ||
+        modem_info_strcasecmp(temp, "NULL") == 0 ||
+        modem_info_strcasecmp(temp, "NONE") == 0 ||
+        modem_info_strcasecmp(temp, "UNKNOWN") == 0) {
+        return 0;
+    }
+
+    return 1;
+}
+
+static int modem_info_read_file(char *buffer, size_t buffer_size)
+{
+    FILE *fp = NULL;
+    size_t read_len;
+
+    if (buffer == NULL || buffer_size == 0) {
+        return -1;
+    }
+
+    fp = fopen(MODEM_INFO_JSON_PATH, "r");
+    if (fp == NULL) {
+        return -1;
+    }
+
+    read_len = fread(buffer, 1, buffer_size - 1, fp);
+    if (ferror(fp)) {
+        fclose(fp);
+        buffer[0] = '\0';
+        return -1;
+    }
+
+    buffer[read_len] = '\0';
+    fclose(fp);
+
+    if (read_len == 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static int modem_info_cache_field(cJSON *root, const char *field, char *cache, size_t cache_size)
+{
+    cJSON *item = NULL;
+    const char *start = NULL;
+    const char *end = NULL;
+    size_t len;
+
+    if (root == NULL || field == NULL || cache == NULL || cache_size == 0) {
+        return 0;
+    }
+
+    item = cJSON_GetObjectItem(root, field);
+    if (item == NULL || !cJSON_IsString(item) || !modem_info_value_is_valid(item->valuestring)) {
+        cache[0] = '\0';
+        return 0;
+    }
+
+    start = item->valuestring;
+    while (modem_info_is_space(*start)) {
+        start++;
+    }
+
+    end = start + strlen(start);
+    while (end > start && modem_info_is_space(*(end - 1))) {
+        end--;
+    }
+
+    len = (size_t)(end - start);
+    if (len >= cache_size) {
+        cache[0] = '\0';
+        return 0;
+    }
+
+    memcpy(cache, start, len);
+    cache[len] = '\0';
+    return 1;
+}
+
+static void load_modem_info_once(void)
+{
+    char json_buffer[1024] = {0};
+    cJSON *root = NULL;
+
+    if (g_modem_info_loaded) {
+        return;
+    }
+
+    g_modem_info_loaded = 1;
+
+    if (modem_info_read_file(json_buffer, sizeof(json_buffer)) != 0) {
+        return;
+    }
+
+    root = cJSON_Parse(json_buffer);
+    if (root == NULL) {
+        return;
+    }
+
+    g_modem_imei_valid = modem_info_cache_field(root, "imei", g_modem_imei, sizeof(g_modem_imei));
+    g_modem_iccid_valid = modem_info_cache_field(root, "iccid", g_modem_iccid, sizeof(g_modem_iccid));
+    g_modem_imsi_valid = modem_info_cache_field(root, "imsi", g_modem_imsi, sizeof(g_modem_imsi));
+
+    cJSON_Delete(root);
+}
 
  /*****************************************************************************
  *                                应用函数实现                               *
@@ -645,6 +838,55 @@ void get_version_info(char *version)
         strcpy(version, AT_VERSION);
     }
     return;
+}
+
+char *get_imei_info(char *imei_data)
+{
+    if (imei_data == NULL) {
+        return NULL;
+    }
+
+    load_modem_info_once();
+    if (!g_modem_imei_valid) {
+        return NULL;
+    }
+
+    HLK_LOG_INFO("IMEI: %s\n", g_modem_imei);
+
+    strcpy(imei_data, g_modem_imei);
+    return imei_data;
+}
+
+char *get_iccid_info(char *iccid_data)
+{
+    if (iccid_data == NULL) {
+        return NULL;
+    }
+
+    load_modem_info_once();
+    if (!g_modem_iccid_valid) {
+        return NULL;
+    }
+    HLK_LOG_INFO("ICCID: %s\n", g_modem_iccid);
+
+    strcpy(iccid_data, g_modem_iccid);
+    return iccid_data;
+}
+
+char *get_imsi_info(char *imsi_data)
+{
+    if (imsi_data == NULL) {
+        return NULL;
+    }
+
+    load_modem_info_once();
+    if (!g_modem_imsi_valid) {
+        return NULL;
+    }
+    HLK_LOG_INFO("IMSI: %s\n", g_modem_imsi);
+
+    strcpy(imsi_data, g_modem_imsi);
+    return imsi_data;
 }
 
 #if 1  // 条件编译开关，便于调试时启用/禁用以下功能

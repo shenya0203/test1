@@ -87,6 +87,8 @@ extern "C" {
 #define MQTT_CONNECT_STATUS_CONNECTED 2
 #define MQTT_CONNECT_STATUS_DISCONNECTED 3
 
+#define IS_START 1
+
 // sys/{ProductKey}/{DeviceCode}/thing/property/post
 /* 数据上报及回复 */
 //#define TOPIC_POST "sys/%s/%s/thing/property/post"
@@ -115,6 +117,12 @@ typedef struct mqtt_app_heartbeat{
     unsigned int delay;
     char module[32];
     char version[128];
+    char *imei;
+    char *iccid;
+    char *imsi;
+    char imei_data[32];
+    char iccid_data[32];
+    char imsi_data[32];
 }MQTT_APP_HEATBEAT_S;
 
 typedef struct mqtt_user_certification{
@@ -237,7 +245,7 @@ typedef struct
 *****************************************************************************/
 extern MQTT_USER_CERT_S mqtt_user_cert; // MQTT用户认证信息结构体
 
-extern int hlk_mqtt_ping();
+extern int hlk_mqtt_ping(int is_start);
 extern void mqtt_topic_type_init();
 extern void mqtt_subscribe_parse();
 extern int hlk_mqtt_main();

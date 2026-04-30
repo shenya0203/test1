@@ -493,6 +493,16 @@ void hlk_mqtt_heartbeat_get(MQTT_APP_HEATBEAT_S *mqtt_app_heartbea)
     
     // 获取设备固件版本信息
     get_version_info(mqtt_app_heartbea->version);
+
+    //获取IMEI
+    mqtt_app_heartbea->imei = get_imei_info(mqtt_app_heartbea->imei_data);
+
+    //获取内置esim卡的ICCID
+    mqtt_app_heartbea->iccid = get_iccid_info(mqtt_app_heartbea->iccid_data);
+
+    //获取内置esim卡的 IMSI
+    mqtt_app_heartbea->imsi = get_imsi_info(mqtt_app_heartbea->imsi_data);
+
     return;
 }
 
@@ -505,7 +515,7 @@ void hlk_mqtt_heartbeat_get(MQTT_APP_HEATBEAT_S *mqtt_app_heartbea)
  * 说明      : 定期向云端发送设备状态信息，保持连接活跃性
  *            心跳包包含设备的详细系统信息，供云端监控设备状态
  ******************************************************************************/
-int hlk_mqtt_ping(void)
+int hlk_mqtt_ping(int is_start)
 {
     int ret;
     MQTT_APP_HEATBEAT_S mqtt_app_heartbeat = {0};
@@ -514,7 +524,9 @@ int hlk_mqtt_ping(void)
     memset(&mqtt_app_heartbeat, 0, sizeof(MQTT_APP_HEATBEAT_S));
     
     // 收集当前设备的系统状态信息
-    hlk_mqtt_heartbeat_get(&mqtt_app_heartbeat);
+    do {
+        hlk_mqtt_heartbeat_get(&mqtt_app_heartbeat);
+    } while (is_start == IS_START && mqtt_app_heartbeat.imei == NULL && mqtt_app_heartbeat.iccid == NULL && mqtt_app_heartbeat.imsi == NULL);
 
     // 创建JSON对象用于构建心跳包
     cJSON *root = NULL;
@@ -536,28 +548,40 @@ int hlk_mqtt_ping(void)
     char cpu_rate_str[16];
     float cpu_rate_rounded = ((int)(mqtt_app_heartbeat.cpu_rate * 100 + 0.5)) / 100.0;
     snprintf(cpu_rate_str, sizeof(cpu_rate_str), "%.2f", cpu_rate_rounded);
-    cJSON_AddStringToObject(root, "CpuRate", cpu_rate_str);
+    if (is_start) {
+        cJSON_AddStringToObject(root, "CpuRate", cpu_rate_str);
 
-    // 添加温度信息
-    cJSON_AddNumberToObject(root, "Temperature", mqtt_app_heartbeat.temperature);
-    
-    // 添加电池信息
-    cJSON_AddNumberToObject(root, "Battery", mqtt_app_heartbeat.battery);
+        // 添加温度信息
+        cJSON_AddNumberToObject(root, "Temperature", mqtt_app_heartbeat.temperature);
+        
+        // 添加电池信息
+        cJSON_AddNumberToObject(root, "Battery", mqtt_app_heartbeat.battery);
 
-    // 添加网络信息
-    cJSON_AddStringToObject(root, "IP", mqtt_app_heartbeat.local_ip);
-    
-    // 添加系统运行时间
-    cJSON_AddNumberToObject(root, "Uptime", mqtt_app_heartbeat.uptime);
-    
-    // 添加时间戳
-    cJSON_AddNumberToObject(root, "Time", mqtt_app_heartbeat.utc_time);
-    
-    // 添加网络延迟
-    cJSON_AddNumberToObject(root, "Delay", mqtt_app_heartbeat.delay);
+        // 添加网络信息
+        cJSON_AddStringToObject(root, "IP", mqtt_app_heartbeat.local_ip);
+        
+        // 添加系统运行时间
+        cJSON_AddNumberToObject(root, "Uptime", mqtt_app_heartbeat.uptime);
+        
+        // 添加时间戳
+        cJSON_AddNumberToObject(root, "Time", mqtt_app_heartbeat.utc_time);
+        
+        // 添加网络延迟
+        cJSON_AddNumberToObject(root, "Delay", mqtt_app_heartbeat.delay);
 
-    // 添加设备模块信息
-    cJSON_AddStringToObject(root, "Module", mqtt_app_heartbeat.module);
+        // 添加设备模块信息
+        cJSON_AddStringToObject(root, "Module", mqtt_app_heartbeat.module);
+
+        // 添加IMEI信息
+        cJSON_AddStringToObject(root, "IMEI", mqtt_app_heartbeat.imei);
+
+        // 添加ICCID信息
+        cJSON_AddStringToObject(root, "ICCID", mqtt_app_heartbeat.iccid);
+
+        // 添加IMSI信息
+        cJSON_AddStringToObject(root, "IMSI", mqtt_app_heartbeat.imsi);
+    }
+    cJSON_AddNumberToObject(root, "Abbreviation", 1);
 
     // 添加版本信息
     cJSON_AddStringToObject(root, "Version", mqtt_app_heartbeat.version);
@@ -2053,7 +2077,7 @@ int hlk_MQTTYield(SHARED_DATA_S *sharedData)
 
     // 初始化操作：订阅主题、发送首次心跳、检查OTA状态
     mqtt_subscribe_parse();   // 订阅所有需要的MQTT主题
-    hlk_mqtt_ping();         // 发送第一个心跳包
+    hlk_mqtt_ping(IS_START);         // 发送第一个心跳包
     hlk_ota_check_version(); // 检查是否有待处理的OTA升级
     
     // MQTT消息处理主循环
@@ -2076,7 +2100,7 @@ int hlk_MQTTYield(SHARED_DATA_S *sharedData)
         if ((int)zig_time_diff_abs(time_start, time_ping) >= 50)
         {
             time_start = time_ping;  // 更新心跳时间基准
-            hlk_mqtt_ping();         // 发送心跳包
+            hlk_mqtt_ping(0);         // 发送心跳包
         }
 
         // 主循环休眠1秒，避免CPU占用过高

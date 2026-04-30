@@ -91,6 +91,9 @@ extern void get_utc_time_info(unsigned long *utc_time);
 extern void get_delay_info(unsigned int *delay); 
 extern void get_module_info(char *module); 
 extern void get_version_info(char *version); 
+extern char *get_imei_info(char *imei_data);
+extern char *get_iccid_info(char *iccid_data);
+extern char *get_imsi_info(char *imsi_data);
 
 extern int get_interface_mac(char *iface,char *mac);
 extern void getWanIpAddress(char* interfaceName, char* ipAddress) ;
