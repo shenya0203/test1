@@ -14,6 +14,11 @@ extern "c" fn sleep(seconds: c_uint) c_int;
 // 直接声明C库的休眠函数
 extern "c" fn usleep(microseconds: c_uint) c_int;
 
+// 设备五元组(License)操作 C 接口声明
+extern "c" fn cfmGetLicense(DN_: [*c]u8, PjK_: [*c]u8, PdK_: [*c]u8, PdS_: [*c]u8, DS_: [*c]u8, size_: usize) c_int;
+extern "c" fn cfmSetLicense(DN_: [*c]const u8, PjK_: [*c]const u8, PdK_: [*c]const u8, PdS_: [*c]const u8, DS_: [*c]const u8) c_int;
+extern "c" fn cfmClearLicense() c_int;
+
 // 毫秒级休眠函数 - Zig实现，避免C ABI兼容性问题
 export fn zig_msleep(msec: c_uint) void {
     // 直接使用C库的usleep函数，参数是微秒
@@ -285,8 +290,113 @@ export fn zig_check_shm_inode(fd: c_int, path_c: [*:0]const u8) bool {
     return true;
 }
 
+fn printUsage() void {
+    std.debug.print(
+        \\Usage: hlk_cloud_zig [options]
+        \\
+        \\Options:
+        \\  -h, --help                 Show this help message and exit
+        \\  -g, --get-license          Get and print the device license (5-tuple)
+        \\  -c, --clear-license        Clear the device license
+        \\  -s, --set-license <DN> <PjK> <PdK> <PdS> <DS>
+        \\                             Set the device license with the provided 5-tuple
+        \\
+        \\If no options are provided, the program will start as a daemon.
+        \\
+    , .{});
+}
+
 // 定义主函数 main()
 pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = try std.process.argsWithAllocator(allocator);
+    defer args.deinit();
+
+    // 跳过程序名自身
+    _ = args.skip();
+
+    if (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+            printUsage();
+            return;
+        } else if (std.mem.eql(u8, arg, "-g") or std.mem.eql(u8, arg, "--get-license")) {
+            var dn: [64]u8 = undefined;
+            var pjk: [64]u8 = undefined;
+            var pdk: [64]u8 = undefined;
+            var pds: [64]u8 = undefined;
+            var ds: [64]u8 = undefined;
+
+            // 初始化为0，确保字符串安全
+            @memset(&dn, 0);
+            @memset(&pjk, 0);
+            @memset(&pdk, 0);
+            @memset(&pds, 0);
+            @memset(&ds, 0);
+
+            const ret = cfmGetLicense(&dn, &pjk, &pdk, &pds, &ds, 64);
+            if (ret == 0) {
+                std.debug.print("Get License Success:\n", .{});
+                std.debug.print("  DeviceName:    {s}\n", .{std.mem.sliceTo(&dn, 0)});
+                std.debug.print("  ProjectKey:    {s}\n", .{std.mem.sliceTo(&pjk, 0)});
+                std.debug.print("  ProductKey:    {s}\n", .{std.mem.sliceTo(&pdk, 0)});
+                std.debug.print("  ProductSecret: {s}\n", .{std.mem.sliceTo(&pds, 0)});
+                std.debug.print("  DeviceSecret:  {s}\n", .{std.mem.sliceTo(&ds, 0)});
+            } else {
+                std.debug.print("Get License Failed, ret: {d}\n", .{ret});
+            }
+            return;
+        } else if (std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "--clear-license")) {
+            const ret = cfmClearLicense();
+            if (ret == 0) {
+                std.debug.print("Clear License Success\n", .{});
+            } else {
+                std.debug.print("Clear License Failed, ret: {d}\n", .{ret});
+            }
+            return;
+        } else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--set-license")) {
+            var params: [5][]const u8 = undefined;
+            var i: usize = 0;
+            while (args.next()) |p| {
+                if (i < 5) {
+                    params[i] = p;
+                }
+                i += 1;
+            }
+            
+            if (i != 5) {
+                std.debug.print("Error: --set-license requires exactly 5 arguments (DN PjK PdK PdS DS), got {d}\n\n", .{i});
+                printUsage();
+                return;
+            }
+
+            const dn_z = try allocator.dupeZ(u8, params[0]);
+            defer allocator.free(dn_z);
+            const pjk_z = try allocator.dupeZ(u8, params[1]);
+            defer allocator.free(pjk_z);
+            const pdk_z = try allocator.dupeZ(u8, params[2]);
+            defer allocator.free(pdk_z);
+            const pds_z = try allocator.dupeZ(u8, params[3]);
+            defer allocator.free(pds_z);
+            const ds_z = try allocator.dupeZ(u8, params[4]);
+            defer allocator.free(ds_z);
+
+            const ret = cfmSetLicense(dn_z.ptr, pjk_z.ptr, pdk_z.ptr, pds_z.ptr, ds_z.ptr);
+            if (ret == 0) {
+                std.debug.print("Set License Success\n", .{});
+            } else {
+                std.debug.print("Set License Failed, ret: {d}\n", .{ret});
+            }
+            return;
+        } else {
+            std.debug.print("Unknown argument: {s}\n\n", .{arg});
+            printUsage();
+            return;
+        }
+    }
+
     const collector_ctx: *modbus_collector.collector_ctx_t = modbus_collector.collector_init();
     _ = modbus_collector.collector_register_signal_report_handler();
 

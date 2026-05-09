@@ -143,6 +143,64 @@ cd /tmp
 ./test1
 ```
 
+## 版本头文件管理
+
+项目中 C 代码使用的 `AT_VERSION` 宏由 `build.zig` 的 `version` 步骤按需生成，
+**平台构建（`zig build mt7688` 等）不再自动刷新版本头文件**。
+
+### 版本字符串格式
+
+```
+#define AT_VERSION "{产品型号}-{基础版本号}-{标识}-{日期时间}"
+```
+
+| 段位 | 来源 | 示例 |
+|---|---|---|
+| 产品型号 | `build.zig` 中每个 `PlatformConfig.product_id` | `7628` / `RM65` / `RM60` |
+| 基础版本号 | `src/hlk_cloud/Makefile` 的 `VERSION_BASE_VAL` | `V1.0.1` |
+| 标识 | `-Dbuild_tag` 命令行参数（默认 `bz`） | `bz`（标准） / `dz`（定制） |
+| 日期时间 | 构建机当前系统时间，格式 `yyMMdd.HHmmss` | `251222.233450` |
+
+最终生成示例：
+
+```c
+#define AT_VERSION "7628-V1.0.1-bz-251222.233450"
+```
+
+### 刷新版本头文件
+
+```bash
+# 生成标准版（默认 build_tag=bz）
+zig build version
+
+# 生成定制版
+zig build version -Dbuild_tag=dz
+```
+
+执行后会**一次性刷新三个平台的版本头文件**（会被 `.gitignore` 忽略）：
+
+- `src/hlk_cloud/src/include/hi_cfm_version_mt7688.h`
+- `src/hlk_cloud/src/include/hi_cfm_version_mt7981.h`
+- `src/hlk_cloud/src/include/hi_cfm_version_mt7621.h`
+
+### 使用约束
+
+- **新克隆仓库或执行 `zig build clean` 后**：必须先运行一次 `zig build version`，
+  否则后续 `zig build mt7688` / `mt7981` / `mt7621` 会因找不到版本头文件而编译失败。
+- **发版时**：在构建产物之前手动执行一次 `zig build version`（根据是标准版还是定制版
+  传入 `-Dbuild_tag`），确保打包的二进制含最新时间戳。
+- **日常增量构建**：不需要每次都刷新版本，保留上一次的头文件即可，避免无谓的全量重编。
+- **基础版本号修改**：统一改 `src/hlk_cloud/Makefile` 里的 `VERSION_BASE_VAL`，
+  然后 `zig build version` 会自动读取新值，**build.zig 不需要改**。
+- **Windows 环境**下使用 PowerShell 获取时间；Linux 环境下会自动回退到 `date` 命令
+  （当前主要在 Windows 下开发）。
+
+### 注意事项
+
+- 若 Makefile 中找不到 `VERSION_BASE_VAL`、或取系统时间失败，`version` 步骤会直接报错退出，
+  **不提供回退/默认值**，需要开发者自行介入修复。
+- `-Dbuild_tag` 只接受 `bz` 或 `dz`，其它值会报错。
+
 ## Build System Configuration
 
 The `build.zig` file provides:

@@ -79,3 +79,22 @@ int cfmSetLicense(const char *DN_, const char *PjK_, const char *PdK_, const cha
 
     return ret;
 }
+
+int cfmClearLicense(void)
+{
+    int ret = 0;
+
+    #ifdef HLK_PRODUCT_RM65
+    ret = cfmClearLicense_RM65();
+    #elif HLK_PRODUCT_RM68
+    ret = cfmClearLicense_RM68();
+    #elif HLK_PRODUCT_RM60
+    ret = cfmClearLicense_RM60();
+    #elif HLK_PRODUCT_RM50
+    ret = cfmClearLicense_RM50();
+    #elif HLK_PRODUCT_7628
+    ret = cfmClearLicense_mt7628();
+    #endif
+
+    return ret;
+}
