@@ -39,7 +39,7 @@ extern "C" {
 
 #define SYSUPGRADE_BIN_PATH_TMP "/tmp/tmp_app.bin"
 #define SYSUPGRADE_BIN_PATH "/tmp/app.bin"
-#define SYSUPGRADE_MSGID_PATH "/log/ota_ver.bin"
+#define SYSUPGRADE_MSGID_PATH "/mnt/data/ota_ver.bin"
 
 //配置文件
 #define MQTT_CONFIG "hlk_mqtt"
@@ -150,6 +150,12 @@ typedef struct
     TOPIC_PACKET_S *ptopic_packet;
     pthread_mutex_t mutex;
     int connect_status; //云端连接状态  0:未连接 1:连接中 2:连接成功 3:连接失败
+    int flowtype;               //流量类型，0表示每月清空， 1表示每年清空，云端仅当上报心跳同时携带IMEI和ICCID且都有值时返回
+    double flowsize;            //当前有效总套餐流量大小， 这个是包括加油包？
+    double current_month_flow;  //当月流量快照  这个当前月份已经使用的流量 如果FlowType == 0 就通过这个字段判断是否超出了当前套餐的流量
+    double current_year_flow;   //当前流量快照  这个当前年份已经使用的流量 如果FlowType == 1 就通过这个字段判断是否超出了当前套餐的流量
+    int current_flow_year;     //当前流量快照所属年份
+    int current_month;         //当前流量快照所属月份
 }SHARED_DATA_S;
 
 /* 海凌科iot云操作对象 */
@@ -219,6 +225,8 @@ typedef enum
     TOPIC_APP,
     DATA_POINTS_UP,
     DATA_POINTS_DOWN,
+    FLOW_UPDATE,
+    FLOW_UPDATE_CONFIRM,
     MQTT_TOPIC_TYPE_END
 }MQTT_TOPIC_TYPE_E;
 
@@ -229,6 +237,13 @@ typedef enum
     HLK_OTA_FLASH_CHECK_ERR,
     HLK_OTA_URL_ERR
 }MQTT_SYSUPGRADE_UP_E;
+
+typedef enum {
+    CHECKOTA_STATUS_NO_UPGRADE_OR_UPGRADED = 2,
+    CHECKOTA_STATUS_UPGRADING = 1,
+    CHECKOTA_STATUS_UPGRADE_CANCEL = 3,
+    CHECKOTA_STATUS_UPGRADE_FAILED = 4,
+} CHECKOTA_STATUS_E;
 
 
 #pragma pack(push, 1) 

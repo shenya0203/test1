@@ -187,10 +187,10 @@ struct MemoryStruct {
 #define SIM_TRAFFIC_UPTIME_PATH "/proc/uptime"
 #define SIM_TRAFFIC_STATE_PATH "/tmp/hlk_sim_traffic_state.json"
 #define SIM_TRAFFIC_SAMPLE_INTERVAL_SEC 60
-#define SIM_TRAFFIC_REPORT_MIN_INTERVAL_SEC (15 * 60)
-#define SIM_TRAFFIC_REPORT_MAX_INTERVAL_SEC (30 * 60)
+#define SIM_TRAFFIC_REPORT_MIN_INTERVAL_SEC (15 * 2)
+#define SIM_TRAFFIC_REPORT_MAX_INTERVAL_SEC (30 * 2)
 #define SIM_TRAFFIC_COUNTER_MAX 0xFFFFFFFFULL
-#define SIM_TRAFFIC_MAX_BYTES_PER_SEC (3ULL * 1024ULL * 1024ULL)
+#define SIM_TRAFFIC_MAX_BYTES_PER_SEC (1ULL * 1024ULL * 1024ULL)    //最大速率 1M/s
 #define SIM_TRAFFIC_STATE_VERSION 2
 
 /*****************************************************************************
@@ -275,6 +275,8 @@ MQTT_PUB_SUB_PATTERN_S mqtt_topic_type_table[] = {
     {TOPIC_APP,                 "sys/%s/%s/thing/property/set",                 "0"}, // APP控制主题
     {DATA_POINTS_UP,            "sys/%s/%s/thing/property/DataPointsUp",        "0"}, //采集数据上报主题
     {DATA_POINTS_DOWN,          "sys/%s/%s/thing/property/DataPointsDown",    "0"}, //采集数据上报主题
+    {FLOW_UPDATE,               "sys/%s/%s/thing/event/flow/post",             "0"},  //设备端通过独立流量主题上报当前流量值 publish
+    {FLOW_UPDATE_CONFIRM,       "sys/%s/%s/thing/event/flow/post_reply",       "0"}, //设备端通过独立流量主题上报当前流量值确认 reply subscribe
     {MQTT_TOPIC_TYPE_END,       NULL,                                           "0"}  // 结束标记
 };
 
@@ -598,6 +600,9 @@ static unsigned long long sim_traffic_calc_delta(unsigned long long current,
     return wrapped_delta;
 }
 
+/*
+    读取已统计的流量数据
+*/
 static int sim_traffic_load_state(SIM_TRAFFIC_STATE_S *state)
 {
     FILE *fp = NULL;
@@ -739,10 +744,6 @@ static int sim_traffic_init(unsigned long long uptime_sec)
         return -1;
     }
 
-    if (sim_traffic_read_interface(&rx_bytes, &tx_bytes) != 0) {
-        return -1;
-    }
-
     if (sim_traffic_load_state(&cached_state) == 0 &&
         strcmp(cached_state.iccid, iccid) == 0) {
         if (cached_state.last_sample_uptime > uptime_sec) {
@@ -760,6 +761,10 @@ static int sim_traffic_init(unsigned long long uptime_sec)
     }
 
 init_new_state:
+    if (sim_traffic_read_interface(&rx_bytes, &tx_bytes) != 0) {
+        return -1;
+    }
+
     memset(&g_sim_traffic_state, 0, sizeof(g_sim_traffic_state));
     g_sim_traffic_state.initialized = 1;
     snprintf(g_sim_traffic_state.iccid, sizeof(g_sim_traffic_state.iccid), "%s", iccid);
@@ -809,61 +814,53 @@ static int sim_traffic_sample(unsigned long long uptime_sec)
 
 static int sim_traffic_report(void)
 {
-    cJSON *root = NULL;
-    cJSON *items_array = NULL;
-    cJSON *item = NULL;
-    char *str = NULL;
-    unsigned long long total_bytes;
     int ret = -1;
+    cJSON *root = NULL;
+    char *str = NULL;
+
+    unsigned long long total_bytes = 0;
+    total_bytes = sharedData.current_month_flow + (g_sim_traffic_state.total_rx_bytes + g_sim_traffic_state.total_tx_bytes)/1024;
+
+    HLK_LOG_INFO("[SIM_TRAFFIC] report total_byte: %llu\n", total_bytes);
+
+    #if 1
 
     root = cJSON_CreateObject();
-    items_array = cJSON_CreateArray();
-    item = cJSON_CreateObject();
-    if (root == NULL || items_array == NULL || item == NULL) {
-        goto exit;
+    if (root == NULL) {
+        HLK_LOG_ERR("[SIM_TRAFFIC] Failed to allocate memory for JSON object.");
+        return -1;
     }
 
-    total_bytes = g_sim_traffic_state.total_rx_bytes + g_sim_traffic_state.total_tx_bytes;
-    cJSON_AddStringToObject(root, "DeviceCode", mqtt_user_cert.deviceName);
-    cJSON_AddNumberToObject(item, "Time", (double)zig_get_timestamp());
-    cJSON_AddStringToObject(item, "Name", "SIMTrafficUsed");
-    cJSON_AddNumberToObject(item, "Value", (double)total_bytes);
-    cJSON_AddStringToObject(item, "ICCID", g_sim_traffic_state.iccid);
-    cJSON_AddStringToObject(item, "Interface", SIM_TRAFFIC_INTERFACE);
-    cJSON_AddNumberToObject(item, "RxBytes", (double)g_sim_traffic_state.total_rx_bytes);
-    cJSON_AddNumberToObject(item, "TxBytes", (double)g_sim_traffic_state.total_tx_bytes);
-    cJSON_AddNumberToObject(item, "CounterBits", 32);
-    cJSON_AddItemToArray(items_array, item);
-    item = NULL;
-    cJSON_AddItemToObject(root, "Items", items_array);
-    items_array = NULL;
+    cJSON_AddNumberToObject(root, "S", 1);
+    cJSON_AddNumberToObject(root, "Time", zig_get_timestamp());
+    cJSON_AddNumberToObject(root, "Flow", total_bytes);
 
     str = cJSON_PrintUnformatted(root);
-    if (str == NULL) {
-        goto exit;
+    if(str == NULL){
+        HLK_LOG_ERR("Failed to allocate memory for JSON formatted.");
+        goto end;
     }
 
-    ret = hlk_mqtt_publish(mqtt_topic_type_table[TOPIC_POST].topic, QOS0, str, strlen(str));
-    if (ret == SUCCESS) {
-        HLK_LOG_INFO("[SIM_TRAFFIC] report ok total=%llu\n", total_bytes);
-    } else {
-        HLK_LOG_ERR("[SIM_TRAFFIC] report failed ret=%d\n", ret);
+    HLK_LOG_INFO("[SIM_TRAFFIC] FLOW_UPDATE: %s\n", str);
+
+    ret = hlk_mqtt_publish(mqtt_topic_type_table[FLOW_UPDATE].topic, QOS0, str, strlen(str));
+    if (ret != SUCCESS) {
+        HLK_LOG_ERR("[SIM_TRAFFIC] mqtt ping publish fail[%d]\r\n", ret);
     }
 
-exit:
+end:
     if (str) {
         free(str);
+        str = NULL;
     }
-    if (item) {
-        cJSON_Delete(item);
-    }
-    if (items_array) {
-        cJSON_Delete(items_array);
-    }
+
     if (root) {
         cJSON_Delete(root);
+        root = NULL;
     }
-    return ret;
+    #endif
+
+    return 0;
 }
 
 static void sim_traffic_process(void)
@@ -896,7 +893,9 @@ static void sim_traffic_process(void)
     }
 
     if (uptime_sec >= g_sim_traffic_state.next_report_uptime) {
-        sim_traffic_report();
+        if (sharedData.flowtype != -1 && sharedData.connect_status == MQTT_CONNECT_STATUS_CONNECTED) {
+            sim_traffic_report();
+        }
         g_sim_traffic_state.next_report_uptime = uptime_sec + sim_traffic_next_report_interval();
         sim_traffic_save_state(&g_sim_traffic_state);
     }
@@ -929,7 +928,7 @@ void hlk_mqtt_heartbeat_get(MQTT_APP_HEATBEAT_S *mqtt_app_heartbea)
     get_battery_info(&mqtt_app_heartbea->battery);
     
     // 获取设备本地IP地址
-    get_local_ip(mqtt_app_heartbea->local_ip);
+    //get_local_ip(mqtt_app_heartbea->local_ip);
     
     // 获取系统运行时间（开机时长）
     get_uptime_info(&mqtt_app_heartbea->uptime);
@@ -978,6 +977,8 @@ int hlk_mqtt_ping(int is_start)
     // 收集当前设备的系统状态信息
     do {
         hlk_mqtt_heartbeat_get(&mqtt_app_heartbeat);
+        //当产品中存在4G时 需要先获取到4G的信息 才能上报数据
+        zig_msleep(1000);
     } while (is_start == IS_START && mqtt_app_heartbeat.imei == NULL && mqtt_app_heartbeat.iccid == NULL && mqtt_app_heartbeat.imsi == NULL);
 
     // 创建JSON对象用于构建心跳包
@@ -988,13 +989,6 @@ int hlk_mqtt_ping(int is_start)
         return -1;
     }
 
-    // 添加内存信息到JSON对象
-    cJSON_AddNumberToObject(root, "Memory", mqtt_app_heartbeat.total_memory);
-    cJSON_AddNumberToObject(root, "AvailableMemory", mqtt_app_heartbeat.free_memory);
-    
-    // 添加磁盘信息到JSON对象
-    cJSON_AddNumberToObject(root, "TotalSize", mqtt_app_heartbeat.disk_size);
-    cJSON_AddNumberToObject(root, "AvailableFreeSpace", mqtt_app_heartbeat.free_disk_size);
     
     // 添加CPU使用率（保留2位小数，使用字符串格式避免精度问题）
     char cpu_rate_str[16];
@@ -1032,11 +1026,19 @@ int hlk_mqtt_ping(int is_start)
 
         // 添加IMSI信息
         cJSON_AddStringToObject(root, "IMSI", mqtt_app_heartbeat.imsi);
+        // 添加内存信息到JSON对象
+        cJSON_AddNumberToObject(root, "Memory", mqtt_app_heartbeat.total_memory);
+        cJSON_AddNumberToObject(root, "AvailableMemory", mqtt_app_heartbeat.free_memory);
+        
+        // 添加磁盘信息到JSON对象
+        cJSON_AddNumberToObject(root, "TotalSize", mqtt_app_heartbeat.disk_size);
+        cJSON_AddNumberToObject(root, "AvailableFreeSpace", mqtt_app_heartbeat.free_disk_size);
+        cJSON_AddStringToObject(root, "Version", mqtt_app_heartbeat.version);
     }
-    cJSON_AddNumberToObject(root, "Abbreviation", 1);
+
+    cJSON_AddNumberToObject(root, "S", 1);
 
     // 添加版本信息
-    cJSON_AddStringToObject(root, "Version", mqtt_app_heartbeat.version);
     
     // 将JSON对象转换为字符串
     char *str = NULL;
@@ -1049,9 +1051,7 @@ int hlk_mqtt_ping(int is_start)
 
     // 通过MQTT发布心跳包到指定主题
     ret = hlk_mqtt_publish(mqtt_topic_type_table[TOPIC_PING_POST].topic, QOS0, str, strlen(str));
-    if (ret == SUCCESS) {
-        HLK_LOG_INFO("mqtt ping publish ok\r\n");
-    } else {
+    if (ret != SUCCESS) {
         HLK_LOG_ERR("mqtt ping publish fail[%d]\r\n", ret);
     }
 
@@ -1087,8 +1087,8 @@ void mqtt_topic_type_init()
             // 使用hlk_topic_make函数生成实际的主题字符串
             hlk_topic_make(mqtt_topic_type_table[topic_type].topic, 
                           mqtt_topic_type_table[topic_type].format);
-            HLK_LOG_INFO("mqtt_topic_type_table[%d].topic:%s\n", topic_type, 
-                mqtt_topic_type_table[topic_type].topic);
+            //HLK_LOG_INFO("mqtt_topic_type_table[%d].topic:%s\n", topic_type, 
+                //mqtt_topic_type_table[topic_type].topic);
         }
         else{
             HLK_LOG_ERR("mqtt_topic_type_table format is NULL!!!!\n");
@@ -1138,7 +1138,7 @@ static void hlk_mqtt_handle_app(MessageData *pdata)
     str = pdata->message->payload;
     
     // 打印接收到的APP消息内容（调试用）
-    HLK_LOG_INFO("%s\n", str);   
+    HLK_LOG_INFO("Recv Cloud INfo %s\n", str);   
     
     //解析这个json 把InputData中的Name和Value提取出来
     cJSON *root = cJSON_Parse(str);
@@ -1275,6 +1275,12 @@ static void hlk_mqtt_handle_app(MessageData *pdata)
     cJSON_Delete(root);
 }
 
+int hlk_checkota_response(int status)
+{
+    // 创建JSON对象用于构建回复消息
+    return 0;
+}
+
 /******************************************************************************
  * 函数名    : hlk_mqtt_handle_set
  * 功能描述  : 处理来自云端的设备设置消息
@@ -1293,7 +1299,55 @@ static void hlk_mqtt_handle_set(MessageData *pdata)
         pdata->topicName->lenstring.len, pdata->topicName->lenstring.data, 
         pdata->message->payloadlen, 
         (int)pdata->message->payloadlen, (char *)pdata->message->payload);
+    HLK_LOG_INFO("DeviceCode: %s\n", mqtt_user_cert.deviceName);
 
+    cJSON *root = cJSON_Parse(pdata->message->payload);
+    if (root == NULL) {
+        HLK_LOG_ERR("cJSON_Parse error\n");
+        return;
+    }
+    char *json_str = cJSON_PrintUnformatted(root);
+    HLK_LOG_INFO("json_str: %s\n", json_str);
+    free(json_str);
+    
+    cJSON *Name = cJSON_GetObjectItem(root, "Name");
+    cJSON *TraceId = cJSON_GetObjectItem(root, "TraceId");
+    cJSON *DeviceCode = cJSON_GetObjectItem(root, "DeviceCode");
+
+    if (strcmp(DeviceCode->valuestring, mqtt_user_cert.deviceName) != 0) {
+        HLK_LOG_ERR("DeviceCode not match\n");
+        return;
+    }
+
+    if (strcmp(Name->valuestring, "CheckOTA") == 0) {
+        HLK_LOG_INFO("################## Cloud Check OTA Status ######################\n");
+
+        //判断是否正在OTA升级？ 怎么判断
+        VersionInfo versionInfo;
+        char version_now[64];
+
+        if (hlk_ota_read_version(SYSUPGRADE_MSGID_PATH, &versionInfo) < 0) {
+            //不在升级状态
+            hlk_checkota_response(CHECKOTA_STATUS_NO_UPGRADE_OR_UPGRADED);
+        } else {
+            HLK_LOG_INFO("versionInfo.progress: %d\n", versionInfo.progress);
+            if (versionInfo.msgid) {
+                get_version_info(version_now); // 获取当前运行的版本号
+                // 比较当前版本与升级目标版本
+                if (strcmp(version_now, versionInfo.version) == 0 && versionInfo.progress == 1){
+                    // 版本匹配且升级流程标志为1，表示升级成功
+                    hlk_checkota_response(CHECKOTA_STATUS_NO_UPGRADE_OR_UPGRADED);
+                } else {
+                    // 版本不匹配或升级流程异常，表示升级失败
+                    hlk_checkota_response(CHECKOTA_STATUS_UPGRADE_FAILED);
+                }
+            } else {
+                hlk_checkota_response(CHECKOTA_STATUS_UPGRADE_FAILED);
+            }
+        }
+    }
+
+    cJSON_Delete(root);
 }
 
 /******************************************************************************
@@ -1456,11 +1510,22 @@ static void hlk_mqtt_handle_ping_reply(MessageData *data)
     // 获取心跳回复消息内容
     int len = data->message->payloadlen;
     char *str = data->message->payload;
-    HLK_LOG_INFO("%s\n", str);
+    HLK_LOG_INFO("ping reply: %.*s\n", len, str);
     static int time_sync = 0;
 
     // 定义JSON解析相关变量
-    cJSON *root = NULL, *item = NULL, *flag = NULL, *max_count = NULL, *server_time = NULL;
+    cJSON *root = NULL, *item = NULL, *flag = NULL, *max_value = NULL, *server_time = NULL, *flowtype_val = NULL, *flowsize_val = NULL;
+    cJSON *min_value = NULL;
+
+    cJSON *CurrentMonthFlow = NULL;
+    cJSON *CurrentYearFlow = NULL;
+    cJSON *CurrentFlowYear = NULL;
+    cJSON *CurrentMonth = NULL;
+
+    double current_month_flow = 0;
+    double current_year_flow = 0;
+    int current_flow_year = 0;
+    int current_month = 0;
     
     // 解析JSON格式的心跳回复
     root = cJSON_Parse(str);
@@ -1472,7 +1537,7 @@ static void hlk_mqtt_handle_ping_reply(MessageData *data)
     
     // 解析是否启用流量限制标志
     flag = cJSON_GetObjectItem(root, "HasLimit");
-    if (flag == NULL)
+    if (flag == NULL && (flag = cJSON_GetObjectItem(root, "HL")) == NULL)
     {
         HLK_LOG_ERR("cJSON_GetObjectItem HasLimit error\n");
         goto exit;
@@ -1480,25 +1545,76 @@ static void hlk_mqtt_handle_ping_reply(MessageData *data)
     
     // 解析已发送消息计数
     item = cJSON_GetObjectItem(root, "AlreadyMesCount");
-    if (item == NULL)
+    if (item == NULL && (item = cJSON_GetObjectItem(root, "AMC")) == NULL)
     {
         HLK_LOG_ERR("cJSON_GetObjectItem AlreadyMesCount error\n");
-        goto exit;
+        //goto exit;
     }
     
     // 解析消息限制的最大值
-    max_count = cJSON_GetObjectItem(root, "MesLimitMin");
-    if (max_count == NULL)
+    min_value = cJSON_GetObjectItem(root, "MesLimitMin");
+    if (min_value == NULL && (min_value = cJSON_GetObjectItem(root, "Min")) == NULL)
     {
         HLK_LOG_ERR("cJSON_GetObjectItem MesLimitMin error\n");
-        goto exit;
+        //goto exit;
+    }
+    // 解析消息限制的最大值
+    max_value = cJSON_GetObjectItem(root, "MesLimitMax");
+    if (max_value == NULL && (max_value = cJSON_GetObjectItem(root, "Max")) == NULL)
+    {
+        HLK_LOG_ERR("cJSON_GetObjectItem MesLimitMin error\n");
+        //goto exit;
     }
 
+    flowtype_val = cJSON_GetObjectItem(root, "FlowType");
+    if (flowtype_val != NULL || (flowtype_val = cJSON_GetObjectItem(root, "FT")) != NULL)
+    {
+        flowsize_val = cJSON_GetObjectItem(root, "FlowSize");
+        if (flowsize_val == NULL && (flowsize_val = cJSON_GetObjectItem(root, "FS")) == NULL)
+        {
+            HLK_LOG_ERR("cJSON_GetObjectItem FlowSize error\n");
+            goto exit;
+        }
+
+        CurrentMonthFlow = cJSON_GetObjectItem(root, "CurrentMonthFlow");   //当月流量快照
+        if (CurrentMonthFlow == NULL && (CurrentMonthFlow = cJSON_GetObjectItem(root, "CMF")) == NULL)
+        {
+            HLK_LOG_ERR("cJSON_GetObjectItem CurrentMonthFlow error\n");
+            goto exit;
+        }
+        CurrentYearFlow = cJSON_GetObjectItem(root, "CurrentYearFlow");     //当前流量快照
+        if (CurrentYearFlow == NULL && (CurrentYearFlow = cJSON_GetObjectItem(root, "CYF")) == NULL)
+        {
+            HLK_LOG_ERR("cJSON_GetObjectItem CurrentYearFlow error\n");
+            goto exit;
+        }
+        CurrentFlowYear = cJSON_GetObjectItem(root, "CurrentFlowYear");     //当前流量快照所属年份
+        if (CurrentFlowYear == NULL && (CurrentFlowYear = cJSON_GetObjectItem(root, "CFY")) == NULL)
+        {
+            HLK_LOG_ERR("cJSON_GetObjectItem CurrentFlowYear error\n");
+            goto exit;
+        }
+        CurrentMonth = cJSON_GetObjectItem(root, "CurrentMonth");           //当前流量快照所属月份
+        if (CurrentMonth == NULL && (CurrentMonth = cJSON_GetObjectItem(root, "CFM")) == NULL)
+        {
+            HLK_LOG_ERR("cJSON_GetObjectItem CurrentMonth error\n");
+            goto exit;
+        }
+
+        sharedData.flowtype = flowtype_val->valueint;
+        sharedData.flowsize = flowsize_val->valuedouble;
+        sharedData.current_month_flow = CurrentMonthFlow->valuedouble;
+        sharedData.current_year_flow = CurrentYearFlow->valuedouble;
+        sharedData.current_flow_year = CurrentFlowYear->valueint;
+        sharedData.current_month = CurrentMonth->valueint;
+
+        HLK_LOG_INFO("flowtype: %d, flowsize: %f, current_month_flow: %f, current_year_flow: %f, current_flow_year: %d, current_month: %d\n", sharedData.flowtype, sharedData.flowsize, sharedData.current_month_flow, sharedData.current_year_flow, sharedData.current_flow_year, sharedData.current_month);
+    }
 
     //服务器时间同步
     unsigned long long utc_time;
     server_time = cJSON_GetObjectItem(root, "ServerTime");
-    if (server_time == NULL)
+    if (server_time == NULL && (server_time = cJSON_GetObjectItem(root, "ST")) == NULL)
     {
         HLK_LOG_ERR("cJSON_GetObjectItem ServerTime error\n");
         goto exit;
@@ -1521,6 +1637,80 @@ exit:
     {
         cJSON_Delete(root);  // 释放JSON对象内存
     }
+}
+
+static void hlk_mqtt_handle_flow_update_confirm(MessageData *data)
+{
+    // 获取流量更新确认消息内容
+    int len = data->message->payloadlen;
+    char *str = data->message->payload;
+    HLK_LOG_INFO("%s\n", str);
+
+    //采取缩写的形式
+    cJSON *root = NULL;
+
+    root = cJSON_Parse(str);
+    if (root == NULL)
+    {
+        HLK_LOG_ERR("cJSON_Parse error\n");
+        return;
+    }
+
+    cJSON *Status = cJSON_GetObjectItem(root, "Status");        //表示设备收到了流量上报
+    if (Status != NULL) {
+        if (Status->valueint == 0) {
+            cJSON *ServerTime = cJSON_GetObjectItem(root, "ServerTime");
+            if (ServerTime == NULL)
+            {
+                HLK_LOG_ERR("cJSON_GetObjectItem Time error\n");
+            }
+
+            cJSON *CurrentMonthFlow = cJSON_GetObjectItem(root, "CurrentMonthFlow");
+            if (CurrentMonthFlow == NULL)
+            {
+                HLK_LOG_ERR("cJSON_GetObjectItem CurrentMonthFlow error\n");
+            }
+
+            cJSON *CurrentYearFlow = cJSON_GetObjectItem(root, "CurrentYearFlow");
+            if (CurrentYearFlow == NULL)
+            {
+                HLK_LOG_ERR("cJSON_GetObjectItem CurrentYearFlow error\n");
+            }
+
+            cJSON *CurrentFlowYear = cJSON_GetObjectItem(root, "CurrentFlowYear");
+            if (CurrentFlowYear == NULL)
+            {
+                HLK_LOG_ERR("cJSON_GetObjectItem CurrentFlowYear error\n");
+            }
+
+            cJSON *CurrentMonth = cJSON_GetObjectItem(root, "CurrentFlowMonth");
+            if (CurrentMonth == NULL)
+            {
+                HLK_LOG_ERR("cJSON_GetObjectItem CurrentFlowMonth error\n");
+            }
+
+            //根据确认的流量判断 是否对sim卡断网 既不准使用内置sim卡进行联网操作
+            if (sharedData.flowtype == 0) { //每月清空流量
+                if (CurrentMonthFlow->valuedouble > sharedData.flowsize) {
+                    HLK_LOG_INFO("[SIM_TRAFFIC] sim card offline\n");
+                    //给内置esim卡断网, 怎么在使用内置esim卡时 ，是及不让发送数据 也不让联网？
+                }
+            } else if (sharedData.flowtype == 1) { //每年清空流量
+                if (CurrentYearFlow->valuedouble > sharedData.flowsize) {
+                    HLK_LOG_INFO("[SIM_TRAFFIC] sim card offline\n");
+                    //给内置esim卡断网
+                }
+            }
+
+        } else {
+            //设备未收到流量 怎么办？
+        }
+    }
+
+    if (root != NULL) {
+        cJSON_Delete(root);
+    }
+    return;
 }
 
 /******************************************************************************
@@ -1870,9 +2060,11 @@ void hlk_mqtt_report_version(int code, int step, int msg_id)
         {
             cJSON_AddStringToObject(root, "Message", "Upgrade completed");  // 升级完成
         }
-        else
+        else if (step > 0 && step < 100)
         {
             cJSON_AddStringToObject(root, "Message", "Upgrading");          // 正在升级
+        } else {
+            cJSON_AddStringToObject(root, "Message", "No Upgrade");          // 正在升级
         }
         break;
         
@@ -1939,7 +2131,7 @@ void hlk_ota_check_version(void)
     char version_now[64];
     
     // 尝试读取缓存的版本升级信息
-    if (hlk_ota_read_version(SYSUPGRADE_MSGID_PATH, &read_verinfo) < 0){
+    if (hlk_ota_read_version(SYSUPGRADE_MSGID_PATH, &read_verinfo) < 0) {
         // 读取文件失败或文件不存在，说明没有待处理的升级
         HLK_LOG_ERR("Read %s err\r\n", SYSUPGRADE_MSGID_PATH);
     } else {
@@ -2103,10 +2295,10 @@ static void hlk_ota_http_child_process(char *server_name, char *path, int pipe_f
 
         if (res != CURLE_OK) {
             siDownFailFlag++;
-            HLK_LOG_INFO("Child process: curl_easy_perform() failed: %d, %s\n", res, errbuf);
+            //HLK_LOG_INFO("Child process: curl_easy_perform() failed: %d, %s\n", res, errbuf);
             
             if (siDownFailFlag <= 3) {
-                HLK_LOG_INFO("Child process: Retry %d/3\n", siDownFailFlag);
+                //HLK_LOG_INFO("Child process: Retry %d/3\n", siDownFailFlag);
                 if (fp) {
                     fclose(fp);
                     fp = NULL;
@@ -2364,7 +2556,7 @@ static void hlk_mqtt_handle_ota(MessageData *data)
     g_ota_size = size->valueint;  // 保存文件大小到全局变量
 
     // 将版本信息写入本地文件，状态设为2（开始升级）
-    //hlk_ota_write_version(SYSUPGRADE_MSGID_PATH, &get_, 2);
+    hlk_ota_write_version(SYSUPGRADE_MSGID_PATH, &get_, 2);
     
     // 解析下载URL，提取主机名、端口和路径
     HLK_LOG_INFO("source->valuestring:%s\n", source->valuestring);
@@ -2432,8 +2624,7 @@ void mqtt_subscribe_parse()
     // 订阅OTA升级主题，绑定OTA升级处理函数
     MQTTSubscribe(hlk_iot.client, mqtt_topic_type_table[TOPIC_UPGRADE].topic, 0, hlk_mqtt_handle_ota);
 
-
-    //MQTTSubscribe(hlk_iot.client, mqtt_topic_type_table[DATA_POINTS_DOWN].topic, 0, hlk_mqtt_handle_data_points_down);
+    MQTTSubscribe(hlk_iot.client, mqtt_topic_type_table[FLOW_UPDATE_CONFIRM].topic, 0, hlk_mqtt_handle_flow_update_confirm);
 
     return;
 }
@@ -2540,11 +2731,17 @@ int hlk_MQTTYield(SHARED_DATA_S *sharedData)
         if ((rc = MQTTYield(hlk_iot.client, 1000)) != SUCCESS)
         {
             // MQTT连接出现问题，进行清理和重连准备
-            HLK_LOG_ERR("rc = %d Disconnect_\r\n", rc);
+            //HLK_LOG_ERR("rc = %d Disconnect_\r\n", rc);
             MQTTDisconnect(hlk_iot.client);           // 断开MQTT连接
             NetworkDisconnect(hlk_iot.network);        // 断开网络连接
             app_msleep(10 * 1000);                     // 等待10秒后重试
             sharedData->connect_status = MQTT_CONNECT_STATUS_DISCONNECTED;            // 连接状态设为0
+            sharedData->flowtype = -1;
+            sharedData->flowsize = 0;
+            sharedData->current_month_flow = 0;
+            sharedData->current_year_flow = 0;
+            sharedData->current_flow_year = 0;
+            sharedData->current_month = 0;
             break;  // 跳出循环，返回上层进行重连
         }
         
@@ -2586,7 +2783,7 @@ int hlk_mqtt_main()
     {
         // 连接海凌科私有云MQTT平台
         case MQTT_CONNECT_HLK:
-            HLK_LOG_INFO("MQTT_CONNECT_HLK\r\n");
+            //HLK_LOG_INFO("MQTT_CONNECT_HLK\r\n");
             
             // 获取设备五元组认证信息
             if(get_mqtt_user_certification_h() != 0){
@@ -2692,9 +2889,9 @@ static int push_data_to_sse(const char *channel, const char *data)
 char *hlk_get_signature(char *timestamp, char *Token, char *Nonce, char *signature)
 {
     // 打印传入参数
-    HLK_LOG_INFO("Timestamp: %s\n", timestamp);
-    HLK_LOG_INFO("Token: %s\n", Token);
-    HLK_LOG_INFO("Nonce: %s\n", Nonce);
+    //HLK_LOG_INFO("Timestamp: %s\n", timestamp);
+    //HLK_LOG_INFO("Token: %s\n", Token);
+    //HLK_LOG_INFO("Nonce: %s\n", Nonce);
 
     char *a[3];
     a[0] = timestamp;
@@ -2710,7 +2907,7 @@ char *hlk_get_signature(char *timestamp, char *Token, char *Nonce, char *signatu
     // 拼接字符串
     char sha1_ori[256] = {0};
     sprintf(sha1_ori, "%s%s%s", a[0], a[1], a[2]);
-    HLK_LOG_INFO("strcat string:%s\n", sha1_ori);
+    //HLK_LOG_INFO("strcat string:%s\n", sha1_ori);
 
     // 计算SHA1
     unsigned char sha1_result[SHA_DIGEST_LENGTH]; // SHA1结果是20字节
@@ -2721,7 +2918,7 @@ char *hlk_get_signature(char *timestamp, char *Token, char *Nonce, char *signatu
         sprintf(signature + (i * 2), "%02x", sha1_result[i]);
     }
 
-    HLK_LOG_INFO("finish!!!!!  %s\r\n", signature);
+    //HLK_LOG_INFO("finish!!!!!  %s\r\n", signature);
     return signature;
 }
 
@@ -2805,7 +3002,6 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
  ******************************************************************************/
  int query_request_address(void)
  {
-     HLK_LOG_INFO("query_request_address\n");
      int ret = 0;
      CURL *curl = NULL;
      CURLcode res;
@@ -2831,11 +3027,11 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
         return -1;
      }
 
-     HLK_LOG_INFO("DN:%s\n", g_hlk_devinfo->deviceName);
-     HLK_LOG_INFO("PJ:%s\n", g_hlk_devinfo->projectKey);
-     HLK_LOG_INFO("PK:%s\n", g_hlk_devinfo->productKey);
-     HLK_LOG_INFO("PS:%s\n", g_hlk_devinfo->productSecret);
-     HLK_LOG_INFO("DS:%s\n", g_hlk_devinfo->deviceSecret);
+     //HLK_LOG_INFO("DN:%s\n", g_hlk_devinfo->deviceName);
+     //HLK_LOG_INFO("PJ:%s\n", g_hlk_devinfo->projectKey);
+     //HLK_LOG_INFO("PK:%s\n", g_hlk_devinfo->productKey);
+     //HLK_LOG_INFO("PS:%s\n", g_hlk_devinfo->productSecret);
+     //HLK_LOG_INFO("DS:%s\n", g_hlk_devinfo->deviceSecret);
  
      // 获取系统时间戳，如果无效则尝试同步
      time_t time_now = get_system_timestamp();
@@ -2941,7 +3137,7 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
     // 执行请求
     res = curl_easy_perform(curl);
     if (res != CURLE_OK) {
-        HLK_LOG_INFO("curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
+        //HLK_LOG_INFO("curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
         if (strlen(errbuf) > 0) {
             HLK_LOG_INFO("Detailed error: %s\n", errbuf);
         }
@@ -3036,7 +3232,7 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
  ******************************************************************************/
 void switch_mqtt_url(char **url)
 {
-    HLK_LOG_INFO("switch_mqtt_url\n");
+    //HLK_LOG_INFO("switch_mqtt_url\n");
     static char url_store[MQTT_URL_COUNT][MQTT_URL_LEN] = {0};
     int ret = -1;
 
@@ -3044,7 +3240,7 @@ void switch_mqtt_url(char **url)
     while (ret != 1)
     {
         ret = query_request_address();
-        HLK_LOG_INFO("query_request_address ret = %d\n", ret);
+        //HLK_LOG_INFO("query_request_address ret = %d\n", ret);
         if (ret == 1)
         {
             // 查询成功，设置MQTT连接地址

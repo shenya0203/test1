@@ -255,8 +255,8 @@ const VersionStep = struct {
 
             const content = try std.fmt.allocPrint(
                 allocator,
-                "#define AT_VERSION \"{s}-{s}-{s}-{s}\"\n",
-                .{ platform.product_id, version_base, self.build_tag, date_str },
+                "#define AT_VERSION \"{s}-{s}-{s}\"\n",
+                .{ if (std.mem.eql(u8, platform.product_id, "7628")) "IR01" else platform.product_id, version_base, date_str },
             );
             defer allocator.free(content);
 

@@ -489,7 +489,7 @@ conn:
   	if(mqtt_user_cert.keepalive == 0)
   		data.keepAliveInterval = 60;    /* 默认保活间隔10秒 */
 	else
-		data.keepAliveInterval = mqtt_user_cert.keepalive;  /* 使用配置的保活间隔 */
+		data.keepAliveInterval = mqtt_user_cert.keepalive;  /* 使用配置的保活间隔 */ 
 	
 	/* 设置清理会话标志 */
 	if(mqtt_user_cert.cleanSession == 0)
@@ -570,6 +570,7 @@ static void *hlk_user_main(void *arg)
 	}else{
 		hlk_iot.connnect_type = MQTT_CONNECT_OTHER;    /* 其他连接类型 */
 	}
+	set_cloud_status(MQTT_CONNECT_STATUS_DISCONNECTED);
 
 	switch_mqtt_url(&options.host);
 
@@ -585,14 +586,21 @@ static void *hlk_user_main(void *arg)
 	sharedData.reponse_time_limmit = 5;  /* 设置响应超时时间为5秒 */
 	sharedData.ptopic_packet = NULL;     /* 主题数据包指针初始化为空 */
 	sharedData.connect_status = MQTT_CONNECT_STATUS_DISCONNECTED;       /* 连接状态初始化为0 */
-	set_cloud_status(MQTT_CONNECT_STATUS_DISCONNECTED);
+	sharedData.flowtype = -1;
+	sharedData.flowsize = 0;
+	sharedData.current_month_flow = 0;
+	sharedData.current_year_flow = 0;
+	sharedData.current_flow_year = 0;
+	sharedData.current_month = 0;
 	pthread_mutex_init(&sharedData.mutex, NULL);  /* 初始化互斥锁 */
 
+	#if 0
 	/* 创建socket处理线程 */
 	if((rc = pthread_create(&thread[0], NULL, socket_main, (void *)&sharedData)) != 0) 
 		HLK_LOG_ERR(" socket thread create failed !\n");
 	else
 	HLK_LOG_INFO(" socket thread create success !\n");
+	#endif
 
 	/* 执行测试循环 */
 	for (i = 0; i < options.iterations; ++i){
@@ -625,9 +633,9 @@ int32_t hi_link_init(void)
 {
 	hlk_log_open("hlk_cloud", LOG_DAEMON);
     /* 打印应用启动信息 */
-    HLK_LOG_INFO("\r\n-----------------------------------------------------------------------------\r\n");
+    //HLK_LOG_INFO("\r\n-----------------------------------------------------------------------------\r\n");
     HLK_LOG_INFO("\r\n----------------------------------APP_Start----------------------------------\r\n");
-    HLK_LOG_INFO("\r\n-----------------------------------------------------------------------------\r\n");
+    //HLK_LOG_INFO("\r\n-----------------------------------------------------------------------------\r\n");
     
     /* 创建U2C通知器，用于用户空间到内核空间的通信 */
 	#ifdef HLK_PRODUCT_WR10

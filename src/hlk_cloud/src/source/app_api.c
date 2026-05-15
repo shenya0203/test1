@@ -572,8 +572,8 @@ void get_mem_info(unsigned long *total_memory,unsigned long *free_memory)
     *free_memory = info.freeram * info.mem_unit;    // 可用内存 = 空闲页数 × 页大小
 
     // 调试输出
-    HLK_LOG_INFO("Total memory: %ld bytes\n", *total_memory);
-    HLK_LOG_INFO("Free memory: %ld bytes\n", *free_memory);
+    //HLK_LOG_INFO("Total memory: %ld bytes\n", *total_memory);
+    //HLK_LOG_INFO("Free memory: %ld bytes\n", *free_memory);
 
     return;
 }
@@ -670,7 +670,7 @@ void get_cpu_info(float *cpu_rate) {
     prev_total = total;
     prev_idle = idle;
 
-    HLK_LOG_INFO("CPU usage: %.2f%%\n", *cpu_rate);
+    //HLK_LOG_INFO("CPU usage: %.2f%%\n", *cpu_rate);
 }
 
 /******************************************************************************
@@ -694,7 +694,7 @@ void get_local_ip(char *local_ip)
     getWanIpAddress(WAN_INTERFACE, local_ip);
     
     // 调试输出
-    HLK_LOG_INFO("WAN IP address: %s\n", local_ip);
+    //HLK_LOG_INFO("WAN IP address: %s\n", local_ip);
     return;
 }
 
@@ -741,7 +741,7 @@ void get_uptime_info(unsigned int *uptime)
     // 转换并返回系统运行时间（秒）
     *uptime = (unsigned int)fUptime;
 
-    HLK_LOG_INFO("Device uptime: %u seconds\n", *uptime);
+    //HLK_LOG_INFO("Device uptime: %u seconds\n", *uptime);
 
     fclose(uptime_file);
 }
@@ -851,7 +851,7 @@ char *get_imei_info(char *imei_data)
         return NULL;
     }
 
-    HLK_LOG_INFO("IMEI: %s\n", g_modem_imei);
+    //HLK_LOG_INFO("IMEI: %s\n", g_modem_imei);
 
     strcpy(imei_data, g_modem_imei);
     return imei_data;
@@ -867,7 +867,7 @@ char *get_iccid_info(char *iccid_data)
     if (!g_modem_iccid_valid) {
         return NULL;
     }
-    HLK_LOG_INFO("ICCID: %s\n", g_modem_iccid);
+    //HLK_LOG_INFO("ICCID: %s\n", g_modem_iccid);
 
     strcpy(iccid_data, g_modem_iccid);
     return iccid_data;
@@ -883,7 +883,7 @@ char *get_imsi_info(char *imsi_data)
     if (!g_modem_imsi_valid) {
         return NULL;
     }
-    HLK_LOG_INFO("IMSI: %s\n", g_modem_imsi);
+    //HLK_LOG_INFO("IMSI: %s\n", g_modem_imsi);
 
     strcpy(imsi_data, g_modem_imsi);
     return imsi_data;
