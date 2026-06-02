@@ -264,7 +264,6 @@ static void load_modem_info_once(void)
         return;
     }
 
-    g_modem_info_loaded = 1;
 
     if (modem_info_read_file(json_buffer, sizeof(json_buffer)) != 0) {
         return;
@@ -278,6 +277,8 @@ static void load_modem_info_once(void)
     g_modem_imei_valid = modem_info_cache_field(root, "imei", g_modem_imei, sizeof(g_modem_imei));
     g_modem_iccid_valid = modem_info_cache_field(root, "iccid", g_modem_iccid, sizeof(g_modem_iccid));
     g_modem_imsi_valid = modem_info_cache_field(root, "imsi", g_modem_imsi, sizeof(g_modem_imsi));
+    
+    g_modem_info_loaded = 1;
 
     cJSON_Delete(root);
 }

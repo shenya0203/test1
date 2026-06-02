@@ -163,6 +163,8 @@ typedef struct {
 typedef struct {
     int initialized;
     char iccid[32];
+    char netif[32];
+    unsigned long long session_id;
     unsigned long long last_rx_bytes;
     unsigned long long last_tx_bytes;
     unsigned long long total_rx_bytes;
@@ -170,6 +172,15 @@ typedef struct {
     unsigned long long last_sample_uptime;
     unsigned long long next_report_uptime;
 } SIM_TRAFFIC_STATE_S;
+
+typedef struct {
+    int valid;
+    char sim_source[16];
+    char dial_status[16];
+    char netif[32];
+    char iccid[32];
+    unsigned long long session_id;
+} SIM_MODEM_STATUS_S;
 
 // 定义内存结构体用于存储HTTP响应数据
 struct MemoryStruct {
@@ -182,16 +193,20 @@ struct MemoryStruct {
 
 // 内置eSIM流量统计配置：运行期状态只写入/tmp，避免磨损Flash
 #define SIM_TRAFFIC_INTERFACE "eth1"
-#define SIM_TRAFFIC_RX_BYTES_PATH "/sys/class/net/" SIM_TRAFFIC_INTERFACE "/statistics/rx_bytes"
-#define SIM_TRAFFIC_TX_BYTES_PATH "/sys/class/net/" SIM_TRAFFIC_INTERFACE "/statistics/tx_bytes"
 #define SIM_TRAFFIC_UPTIME_PATH "/proc/uptime"
 #define SIM_TRAFFIC_STATE_PATH "/tmp/hlk_sim_traffic_state.json"
+#define SIM_MODEM_STATUS_PATH "/tmp/modem_status.json"
+#define SIM_TRAFFIC_BLOCK_PATH "/tmp/internal_sim_blocked.json"
+#define SIM_TRAFFIC_BLOCK_TMP_PATH "/tmp/internal_sim_blocked.json.tmp"
 #define SIM_TRAFFIC_SAMPLE_INTERVAL_SEC 60
 #define SIM_TRAFFIC_REPORT_MIN_INTERVAL_SEC (15 * 2)
 #define SIM_TRAFFIC_REPORT_MAX_INTERVAL_SEC (30 * 2)
 #define SIM_TRAFFIC_COUNTER_MAX 0xFFFFFFFFULL
 #define SIM_TRAFFIC_MAX_BYTES_PER_SEC (1ULL * 1024ULL * 1024ULL)    //最大速率 1M/s
-#define SIM_TRAFFIC_STATE_VERSION 2
+#define SIM_TRAFFIC_STATE_VERSION 3
+#define SIM_TRAFFIC_SIM_INTERNAL "internal"
+#define SIM_TRAFFIC_DIAL_CONNECTED "connected"
+#define SIM_TRAFFIC_BLOCK_REASON "flow_limit"
 
 /*****************************************************************************
  * 测试使用的私有云设备信息（用于开发调试阶段）
@@ -533,6 +548,70 @@ static int sim_traffic_get_uptime(unsigned long long *uptime_sec)
     return 0;
 }
 
+static int sim_traffic_read_modem_status(SIM_MODEM_STATUS_S *status)
+{
+    FILE *fp = NULL;
+    char buf[1024] = {0};
+    size_t read_len;
+    cJSON *root = NULL;
+    cJSON *item = NULL;
+
+    if (status == NULL) {
+        return -1;
+    }
+
+    memset(status, 0, sizeof(*status));
+    snprintf(status->sim_source, sizeof(status->sim_source), "%s", "unknown");
+    snprintf(status->dial_status, sizeof(status->dial_status), "%s", "unknown");
+
+    fp = fopen(SIM_MODEM_STATUS_PATH, "r");
+    if (fp == NULL) {
+        HLK_LOG_ERR("[SIM_TRAFFIC] open %s failed: %s\n", SIM_MODEM_STATUS_PATH, strerror(errno));
+        return -1;
+    }
+
+    read_len = fread(buf, 1, sizeof(buf) - 1, fp);
+    fclose(fp);
+    if (read_len == 0) {
+        HLK_LOG_ERR("[SIM_TRAFFIC] read %s failed\n", SIM_MODEM_STATUS_PATH);
+        return -1;
+    }
+    buf[read_len] = '\0';
+
+    root = cJSON_Parse(buf);
+    if (root == NULL) {
+        HLK_LOG_ERR("[SIM_TRAFFIC] parse %s failed\n", SIM_MODEM_STATUS_PATH);
+        return -1;
+    }
+
+    item = cJSON_GetObjectItem(root, "sim_source");
+    if (cJSON_IsString(item) && item->valuestring != NULL) {
+        snprintf(status->sim_source, sizeof(status->sim_source), "%s", item->valuestring);
+    }
+
+    item = cJSON_GetObjectItem(root, "dial_status");
+    if (cJSON_IsString(item) && item->valuestring != NULL) {
+        snprintf(status->dial_status, sizeof(status->dial_status), "%s", item->valuestring);
+    }
+
+    item = cJSON_GetObjectItem(root, "session_id");
+    if (cJSON_IsNumber(item)) {
+        status->session_id = (unsigned long long)item->valuedouble;
+    }
+
+    status->valid = 1;
+    cJSON_Delete(root);
+    return 0;
+}
+
+static int sim_traffic_is_internal_connected(const SIM_MODEM_STATUS_S *status)
+{
+    return status != NULL &&
+           status->valid &&
+           strcmp(status->sim_source, SIM_TRAFFIC_SIM_INTERNAL) == 0 &&
+           strcmp(status->dial_status, SIM_TRAFFIC_DIAL_CONNECTED) == 0;
+}
+
 static int sim_traffic_read_counter(const char *path, unsigned long long *value)
 {
     FILE *fp = NULL;
@@ -563,11 +642,18 @@ static int sim_traffic_read_counter(const char *path, unsigned long long *value)
 
 static int sim_traffic_read_interface(unsigned long long *rx_bytes, unsigned long long *tx_bytes)
 {
-    if (sim_traffic_read_counter(SIM_TRAFFIC_RX_BYTES_PATH, rx_bytes) != 0) {
+    char rx_path[128] = {0};
+    char tx_path[128] = {0};
+    const char *interface_name = SIM_TRAFFIC_INTERFACE;
+
+    snprintf(rx_path, sizeof(rx_path), "/sys/class/net/%s/statistics/rx_bytes", interface_name);
+    snprintf(tx_path, sizeof(tx_path), "/sys/class/net/%s/statistics/tx_bytes", interface_name);
+
+    if (sim_traffic_read_counter(rx_path, rx_bytes) != 0) {
         return -1;
     }
 
-    if (sim_traffic_read_counter(SIM_TRAFFIC_TX_BYTES_PATH, tx_bytes) != 0) {
+    if (sim_traffic_read_counter(tx_path, tx_bytes) != 0) {
         return -1;
     }
 
@@ -639,9 +725,10 @@ static int sim_traffic_load_state(SIM_TRAFFIC_STATE_S *state)
     }
 
     memset(state, 0, sizeof(*state));
-    item = cJSON_GetObjectItem(root, "ICCID");
-    if (cJSON_IsString(item) && item->valuestring != NULL) {
-        snprintf(state->iccid, sizeof(state->iccid), "%s", item->valuestring);
+
+    item = cJSON_GetObjectItem(root, "SessionId");
+    if (cJSON_IsNumber(item)) {
+        state->session_id = (unsigned long long)item->valuedouble;
     }
 
     item = cJSON_GetObjectItem(root, "LastRxBytes");
@@ -691,8 +778,7 @@ static int sim_traffic_save_state(const SIM_TRAFFIC_STATE_S *state)
     }
 
     cJSON_AddNumberToObject(root, "Version", SIM_TRAFFIC_STATE_VERSION);
-    cJSON_AddStringToObject(root, "ICCID", state->iccid);
-    cJSON_AddStringToObject(root, "Interface", SIM_TRAFFIC_INTERFACE);
+    cJSON_AddNumberToObject(root, "SessionId", (double)state->session_id);
     cJSON_AddNumberToObject(root, "CounterBits", 32);
     cJSON_AddNumberToObject(root, "LastRxBytes", (double)state->last_rx_bytes);
     cJSON_AddNumberToObject(root, "LastTxBytes", (double)state->last_tx_bytes);
@@ -728,7 +814,7 @@ exit:
     return ret;
 }
 
-static int sim_traffic_init(unsigned long long uptime_sec)
+static int sim_traffic_init(unsigned long long uptime_sec, const SIM_MODEM_STATUS_S *modem_status)
 {
     unsigned long long rx_bytes = 0;
     unsigned long long tx_bytes = 0;
@@ -739,13 +825,8 @@ static int sim_traffic_init(unsigned long long uptime_sec)
         return 0;
     }
 
-    if (get_iccid_info(iccid) == NULL) {
-        HLK_LOG_ERR("[SIM_TRAFFIC] ICCID not ready, wait next cycle\n");
-        return -1;
-    }
-
-    if (sim_traffic_load_state(&cached_state) == 0 &&
-        strcmp(cached_state.iccid, iccid) == 0) {
+    //如果未初始化过，尝试加载旧的流量统计状态
+    if (sim_traffic_load_state(&cached_state) == 0) {
         if (cached_state.last_sample_uptime > uptime_sec) {
             HLK_LOG_ERR("[SIM_TRAFFIC] stale uptime state ignored last=%llu current=%llu\n",
                         cached_state.last_sample_uptime, uptime_sec);
@@ -753,10 +834,30 @@ static int sim_traffic_init(unsigned long long uptime_sec)
         }
 
         g_sim_traffic_state = cached_state;
+        //如果session_id不一致，则需要重新读取流量统计数据
+        if (g_sim_traffic_state.session_id != modem_status->session_id) {
+            if (sim_traffic_read_interface(&rx_bytes, &tx_bytes) != 0) {
+                return -1;
+            }
+            g_sim_traffic_state.session_id = modem_status->session_id;
+            g_sim_traffic_state.last_rx_bytes = rx_bytes;
+            g_sim_traffic_state.last_tx_bytes = tx_bytes;
+            g_sim_traffic_state.last_sample_uptime = uptime_sec;
+
+            HLK_LOG_INFO("[SIM_TRAFFIC] load state and reset baseline netif=%s session=%llu rx=%llu tx=%llu\n",
+                         g_sim_traffic_state.netif, g_sim_traffic_state.session_id, rx_bytes, tx_bytes);
+        }
+
+        //如果下次上报时间小于当前时间，则需要更新下次上报时间
         if (g_sim_traffic_state.next_report_uptime <= uptime_sec) {
             g_sim_traffic_state.next_report_uptime = uptime_sec + sim_traffic_next_report_interval();
         }
+
+        //保存流量统计状态
+        sim_traffic_save_state(&g_sim_traffic_state);
+
         HLK_LOG_INFO("[SIM_TRAFFIC] load state from %s\n", SIM_TRAFFIC_STATE_PATH);
+
         return 0;
     }
 
@@ -767,19 +868,20 @@ init_new_state:
 
     memset(&g_sim_traffic_state, 0, sizeof(g_sim_traffic_state));
     g_sim_traffic_state.initialized = 1;
-    snprintf(g_sim_traffic_state.iccid, sizeof(g_sim_traffic_state.iccid), "%s", iccid);
+    g_sim_traffic_state.session_id = modem_status->session_id;
     g_sim_traffic_state.last_rx_bytes = rx_bytes;
     g_sim_traffic_state.last_tx_bytes = tx_bytes;
     g_sim_traffic_state.last_sample_uptime = uptime_sec;
     g_sim_traffic_state.next_report_uptime = uptime_sec + sim_traffic_next_report_interval();
     sim_traffic_save_state(&g_sim_traffic_state);
 
-    HLK_LOG_INFO("[SIM_TRAFFIC] init rx=%llu tx=%llu next_report_uptime=%llu\n",
+    HLK_LOG_INFO("[SIM_TRAFFIC] init session=%llu rx=%llu tx=%llu next_report_uptime=%llu\n",
+                 g_sim_traffic_state.session_id,
                  rx_bytes, tx_bytes, g_sim_traffic_state.next_report_uptime);
     return 0;
 }
 
-static int sim_traffic_sample(unsigned long long uptime_sec)
+static int sim_traffic_sample(unsigned long long uptime_sec, const SIM_MODEM_STATUS_S *modem_status)
 {
     unsigned long long rx_bytes = 0;
     unsigned long long tx_bytes = 0;
@@ -787,8 +889,23 @@ static int sim_traffic_sample(unsigned long long uptime_sec)
     unsigned long long tx_delta;
     unsigned long long elapsed_sec;
 
+    if (modem_status == NULL) {
+        return -1;
+    }
+
     if (sim_traffic_read_interface(&rx_bytes, &tx_bytes) != 0) {
         return -1;
+    }
+
+    if (g_sim_traffic_state.session_id != modem_status->session_id) {
+        g_sim_traffic_state.session_id = modem_status->session_id;
+        g_sim_traffic_state.last_rx_bytes = rx_bytes;
+        g_sim_traffic_state.last_tx_bytes = tx_bytes;
+        g_sim_traffic_state.last_sample_uptime = uptime_sec;
+        sim_traffic_save_state(&g_sim_traffic_state);
+
+        HLK_LOG_INFO("[SIM_TRAFFIC] session changed, reset baseline session=%llu rx=%llu tx=%llu\n", g_sim_traffic_state.session_id, rx_bytes, tx_bytes);
+        return 0;
     }
 
     elapsed_sec = uptime_sec - g_sim_traffic_state.last_sample_uptime;
@@ -806,8 +923,8 @@ static int sim_traffic_sample(unsigned long long uptime_sec)
     g_sim_traffic_state.last_sample_uptime = uptime_sec;
     sim_traffic_save_state(&g_sim_traffic_state);
 
-    HLK_LOG_INFO("[SIM_TRAFFIC] sample rx_delta=%llu tx_delta=%llu total=%llu\n",
-                 rx_delta, tx_delta,
+    HLK_LOG_INFO("[SIM_TRAFFIC] sample session=%llu rx_delta=%llu tx_delta=%llu total=%llu\n",
+                 g_sim_traffic_state.session_id, rx_delta, tx_delta,
                  g_sim_traffic_state.total_rx_bytes + g_sim_traffic_state.total_tx_bytes);
     return 0;
 }
@@ -863,41 +980,118 @@ end:
     return 0;
 }
 
+static int sim_traffic_write_block_request(const char *iccid)
+{
+    FILE *fp = NULL;
+    cJSON *root = NULL;
+    char *str = NULL;
+    int ret = -1;
+
+    root = cJSON_CreateObject();
+    if (root == NULL) {
+        return -1;
+    }
+
+    cJSON_AddBoolToObject(root, "blocked", 1);
+    cJSON_AddStringToObject(root, "reason", SIM_TRAFFIC_BLOCK_REASON);
+    cJSON_AddStringToObject(root, "iccid", iccid != NULL ? iccid : "");
+    cJSON_AddNumberToObject(root, "time", (double)zig_get_timestamp());
+
+    str = cJSON_PrintUnformatted(root);
+    if (str == NULL) {
+        goto exit;
+    }
+
+    fp = fopen(SIM_TRAFFIC_BLOCK_TMP_PATH, "w");
+    if (fp == NULL) {
+        HLK_LOG_ERR("[SIM_TRAFFIC] open %s failed: %s\n", SIM_TRAFFIC_BLOCK_TMP_PATH, strerror(errno));
+        goto exit;
+    }
+
+    if (fputs(str, fp) < 0) {
+        HLK_LOG_ERR("[SIM_TRAFFIC] write %s failed\n", SIM_TRAFFIC_BLOCK_TMP_PATH);
+        fclose(fp);
+        goto exit;
+    }
+    fclose(fp);
+    fp = NULL;
+
+    if (rename(SIM_TRAFFIC_BLOCK_TMP_PATH, SIM_TRAFFIC_BLOCK_PATH) != 0) {
+        HLK_LOG_ERR("[SIM_TRAFFIC] rename block request failed: %s\n", strerror(errno));
+        goto exit;
+    }
+
+    HLK_LOG_INFO("[SIM_TRAFFIC] write internal sim block request: %s\n", str);
+    ret = 0;
+    //添加防火墙 禁止内置卡联网 禁止eth1联网 加防火墙 但 它的拨号状态还是连着的怎么办？
+    
+
+exit:
+    if (fp != NULL) {
+        fclose(fp);
+    }
+    if (str != NULL) {
+        free(str);
+    }
+    if (root != NULL) {
+        cJSON_Delete(root);
+    }
+    return ret;
+}
+
 static void sim_traffic_process(void)
 {
     unsigned long long uptime_sec = 0;
+    SIM_MODEM_STATUS_S modem_status = {0};
+    static unsigned long long last_status_log_uptime = 0;
 
     if (sim_traffic_get_uptime(&uptime_sec) != 0) {
+        HLK_LOG_ERR("[SIM_TRAFFIC] get uptime failed\n");
         return;
     }
 
-    if (sim_traffic_init(uptime_sec) != 0) {
+    if (sim_traffic_read_modem_status(&modem_status) != 0) {
+        if (last_status_log_uptime == 0 ||
+            uptime_sec - last_status_log_uptime >= SIM_TRAFFIC_SAMPLE_INTERVAL_SEC) {
+            HLK_LOG_ERR("[SIM_TRAFFIC] modem status not ready, skip traffic sample\n");
+            last_status_log_uptime = uptime_sec;
+        }
         return;
     }
 
+    if (!sim_traffic_is_internal_connected(&modem_status)) {
+        //HLK_LOG_ERR("[SIM_TRAFFIC] modem status not connected\n"); 
+        return;
+    }
+
+    if (sim_traffic_init(uptime_sec, &modem_status) != 0) {
+        HLK_LOG_ERR("[SIM_TRAFFIC] sim traffic init failed\n");
+        return;
+    }
+
+    //如果上次采样时间大于当前时间，则需要重置流量统计状态
     if (g_sim_traffic_state.last_sample_uptime > uptime_sec) {
+        //什么情形下 会出现这种情况？ uptime翻转 运行超过了32位时间的上限？
         HLK_LOG_ERR("[SIM_TRAFFIC] uptime moved backwards, reset runtime traffic state\n");
         g_sim_traffic_state.initialized = 0;
-        sim_traffic_init(uptime_sec);
+        sim_traffic_init(uptime_sec, &modem_status);
         return;
     }
 
-    if (g_sim_traffic_state.last_sample_uptime == 0 ||
-        uptime_sec - g_sim_traffic_state.last_sample_uptime >= SIM_TRAFFIC_SAMPLE_INTERVAL_SEC) {
-        sim_traffic_sample(uptime_sec);
-    }
-
-    if (g_sim_traffic_state.next_report_uptime == 0) {
-        g_sim_traffic_state.next_report_uptime = uptime_sec + sim_traffic_next_report_interval();
-        sim_traffic_save_state(&g_sim_traffic_state);
+    //如果上次采样时间小于当前时间，则需要采样流量统计数据
+    if ( uptime_sec - g_sim_traffic_state.last_sample_uptime >= SIM_TRAFFIC_SAMPLE_INTERVAL_SEC) {   //1分钟采样一次
+        sim_traffic_sample(uptime_sec, &modem_status);
     }
 
     if (uptime_sec >= g_sim_traffic_state.next_report_uptime) {
+        //上报流量统计数据
         if (sharedData.flowtype != -1 && sharedData.connect_status == MQTT_CONNECT_STATUS_CONNECTED) {
             sim_traffic_report();
         }
+
+        //更新下次上报时间
         g_sim_traffic_state.next_report_uptime = uptime_sec + sim_traffic_next_report_interval();
-        sim_traffic_save_state(&g_sim_traffic_state);
+        //sim_traffic_save_state(&g_sim_traffic_state);
     }
 }
 
@@ -979,6 +1173,7 @@ int hlk_mqtt_ping(int is_start)
         hlk_mqtt_heartbeat_get(&mqtt_app_heartbeat);
         //当产品中存在4G时 需要先获取到4G的信息 才能上报数据
         zig_msleep(1000);
+        HLK_LOG_INFO("imei: %s, iccid: %s, imsi: %s\n", mqtt_app_heartbeat.imei, mqtt_app_heartbeat.iccid, mqtt_app_heartbeat.imsi);
     } while (is_start == IS_START && mqtt_app_heartbeat.imei == NULL && mqtt_app_heartbeat.iccid == NULL && mqtt_app_heartbeat.imsi == NULL);
 
     // 创建JSON对象用于构建心跳包
@@ -1275,9 +1470,43 @@ static void hlk_mqtt_handle_app(MessageData *pdata)
     cJSON_Delete(root);
 }
 
-int hlk_checkota_response(int status)
+int hlk_checkota_response(int status, char *id)
 {
-    // 创建JSON对象用于构建回复消息
+    cJSON *root = cJSON_CreateObject();
+    if (root == NULL) {
+        HLK_LOG_ERR("cJSON_CreateObject error\n");
+        return -1;
+    }
+
+    cJSON_AddStringToObject(root, "ID", id);
+    cJSON_AddNumberToObject(root, "Status", status);
+
+    switch (status)
+    {
+    case CHECKOTA_STATUS_NO_UPGRADE_OR_UPGRADED:
+        cJSON_AddStringToObject(root, "Data", "No Upgrade");
+        break;
+    case CHECKOTA_STATUS_UPGRADING:
+        cJSON_AddStringToObject(root, "Data", "Upgrading");
+        break;
+    default :
+        cJSON_AddStringToObject(root, "Data", "Unknown");
+        break;
+    }
+
+    char *json_str = cJSON_PrintUnformatted(root);
+    if (json_str == NULL) {
+        HLK_LOG_ERR("cJSON_PrintUnformatted error\n");
+        cJSON_Delete(root);
+        root = NULL;
+        return -1;
+    }
+    hlk_mqtt_publish(mqtt_topic_type_table[TOPIC_GET_REPLY].topic, QOS0, json_str, strlen(json_str));
+    free(json_str);
+
+
+    cJSON_Delete(root);
+    root = NULL;
     return 0;
 }
 
@@ -1313,13 +1542,14 @@ static void hlk_mqtt_handle_set(MessageData *pdata)
     cJSON *Name = cJSON_GetObjectItem(root, "Name");
     cJSON *TraceId = cJSON_GetObjectItem(root, "TraceId");
     cJSON *DeviceCode = cJSON_GetObjectItem(root, "DeviceCode");
+    cJSON *Id = cJSON_GetObjectItem(root, "Id");
 
     if (strcmp(DeviceCode->valuestring, mqtt_user_cert.deviceName) != 0) {
         HLK_LOG_ERR("DeviceCode not match\n");
         return;
     }
 
-    if (strcmp(Name->valuestring, "CheckOTA") == 0) {
+    if (Name != NULL && (strcmp(Name->valuestring, "CheckOTA") == 0) && Id != NULL) {
         HLK_LOG_INFO("################## Cloud Check OTA Status ######################\n");
 
         //判断是否正在OTA升级？ 怎么判断
@@ -1328,7 +1558,7 @@ static void hlk_mqtt_handle_set(MessageData *pdata)
 
         if (hlk_ota_read_version(SYSUPGRADE_MSGID_PATH, &versionInfo) < 0) {
             //不在升级状态
-            hlk_checkota_response(CHECKOTA_STATUS_NO_UPGRADE_OR_UPGRADED);
+            hlk_checkota_response(CHECKOTA_STATUS_NO_UPGRADE_OR_UPGRADED, Id->valuestring);
         } else {
             HLK_LOG_INFO("versionInfo.progress: %d\n", versionInfo.progress);
             if (versionInfo.msgid) {
@@ -1336,13 +1566,13 @@ static void hlk_mqtt_handle_set(MessageData *pdata)
                 // 比较当前版本与升级目标版本
                 if (strcmp(version_now, versionInfo.version) == 0 && versionInfo.progress == 1){
                     // 版本匹配且升级流程标志为1，表示升级成功
-                    hlk_checkota_response(CHECKOTA_STATUS_NO_UPGRADE_OR_UPGRADED);
+                    hlk_checkota_response(CHECKOTA_STATUS_NO_UPGRADE_OR_UPGRADED, Id->valuestring);
                 } else {
                     // 版本不匹配或升级流程异常，表示升级失败
-                    hlk_checkota_response(CHECKOTA_STATUS_UPGRADE_FAILED);
+                    hlk_checkota_response(CHECKOTA_STATUS_UPGRADE_FAILED, Id->valuestring);
                 }
             } else {
-                hlk_checkota_response(CHECKOTA_STATUS_UPGRADE_FAILED);
+                hlk_checkota_response(CHECKOTA_STATUS_UPGRADE_FAILED, Id->valuestring);
             }
         }
     }
@@ -1689,16 +1919,26 @@ static void hlk_mqtt_handle_flow_update_confirm(MessageData *data)
                 HLK_LOG_ERR("cJSON_GetObjectItem CurrentFlowMonth error\n");
             }
 
-            //根据确认的流量判断 是否对sim卡断网 既不准使用内置sim卡进行联网操作
-            if (sharedData.flowtype == 0) { //每月清空流量
+            // 根据云端确认的套餐流量判断是否通知守护进程禁止内置卡继续联网。
+            if (sharedData.flowtype == 0 && CurrentMonthFlow != NULL) { //每月清空流量
                 if (CurrentMonthFlow->valuedouble > sharedData.flowsize) {
-                    HLK_LOG_INFO("[SIM_TRAFFIC] sim card offline\n");
-                    //给内置esim卡断网, 怎么在使用内置esim卡时 ，是及不让发送数据 也不让联网？
+                    SIM_MODEM_STATUS_S modem_status = {0};
+
+                    HLK_LOG_INFO("[SIM_TRAFFIC] internal sim flow limit reached by month\n");
+                    if (sim_traffic_read_modem_status(&modem_status) == 0 &&
+                        sim_traffic_is_internal_connected(&modem_status)) {
+                        sim_traffic_write_block_request(modem_status.iccid);
+                    }
                 }
-            } else if (sharedData.flowtype == 1) { //每年清空流量
+            } else if (sharedData.flowtype == 1 && CurrentYearFlow != NULL) { //每年清空流量
                 if (CurrentYearFlow->valuedouble > sharedData.flowsize) {
-                    HLK_LOG_INFO("[SIM_TRAFFIC] sim card offline\n");
-                    //给内置esim卡断网
+                    SIM_MODEM_STATUS_S modem_status = {0};
+
+                    HLK_LOG_INFO("[SIM_TRAFFIC] internal sim flow limit reached by year\n");
+                    if (sim_traffic_read_modem_status(&modem_status) == 0 &&
+                        sim_traffic_is_internal_connected(&modem_status)) {
+                        sim_traffic_write_block_request(modem_status.iccid);
+                    }
                 }
             }
 
@@ -1710,6 +1950,7 @@ static void hlk_mqtt_handle_flow_update_confirm(MessageData *data)
     if (root != NULL) {
         cJSON_Delete(root);
     }
+
     return;
 }
 
@@ -1979,7 +2220,7 @@ int hlk_ota_write_version(const char *filename, const VersionInfo *info, int pro
     FILE *fp_;
     fp_ = fopen(filename, "wb");
     if (!fp_){
-        HLK_LOG_ERR("open %s failed! \r\n", filename);
+        //HLK_LOG_ERR("open %s failed! \r\n", filename);
         return -1;
     }
     
@@ -2133,7 +2374,7 @@ void hlk_ota_check_version(void)
     // 尝试读取缓存的版本升级信息
     if (hlk_ota_read_version(SYSUPGRADE_MSGID_PATH, &read_verinfo) < 0) {
         // 读取文件失败或文件不存在，说明没有待处理的升级
-        HLK_LOG_ERR("Read %s err\r\n", SYSUPGRADE_MSGID_PATH);
+        HLK_LOG_INFO("DoNot Read Upgrade Info\n");
     } else {
         // 文件存在，检查版本号和消息ID
         if (read_verinfo.msgid) {
@@ -2747,12 +2988,13 @@ int hlk_MQTTYield(SHARED_DATA_S *sharedData)
         
         // 检查是否需要发送心跳包（每50秒发送一次）
         time_ping = zig_get_timestamp();
-        if ((int)zig_time_diff_abs(time_start, time_ping) >= 50)
+        if ((int)zig_time_diff_abs(time_start, time_ping) >= 600)
         {
             time_start = time_ping;  // 更新心跳时间基准
             hlk_mqtt_ping(0);         // 发送心跳包
         }
 
+        //HLK_LOG_INFO("sim_traffic_process\r\n");
         sim_traffic_process(); // 基于/proc/uptime每分钟采样，15~30分钟随机上报
 
         // 主循环休眠1秒，避免CPU占用过高
