@@ -385,6 +385,16 @@ int fota_Upgrade_Writing(void)
     #elif defined(HLK_PRODUCT_RM50)
     openwrt_upgrade_firmware();
     #elif defined(HLK_PRODUCT_7628)
+        //关闭其他进程
+        system("/etc/init.d/cron stop");
+        system("/etc/init.d/edge stop");
+        system("/etc/init.d/socket stop");
+        system("/etc/init.d/mqtt_app stop");
+        system("/etc/init.d/modem_monitor stop");
+        system("/etc/init.d/hlk_ubus_daemon stop;");
+        //system("/etc/init.d/network stop");
+        system("echo 1 > /sys/kernel/hlk_watchdog/disarm"); //禁用看门狗 开始升级固件
+
     //7628固件升级
     //固件组成：固件头 MD5 固件 32字节  更新内容 1024-32字节，固件 
     //1. 禁止页面升级
@@ -844,8 +854,8 @@ static int sim_traffic_init(unsigned long long uptime_sec, const SIM_MODEM_STATU
             g_sim_traffic_state.last_tx_bytes = tx_bytes;
             g_sim_traffic_state.last_sample_uptime = uptime_sec;
 
-            HLK_LOG_INFO("[SIM_TRAFFIC] load state and reset baseline netif=%s session=%llu rx=%llu tx=%llu\n",
-                         g_sim_traffic_state.netif, g_sim_traffic_state.session_id, rx_bytes, tx_bytes);
+            HLK_LOG_INFO("[SIM_TRAFFIC] load state and reset baseline session=%llu rx=%llu tx=%llu\n",
+                         g_sim_traffic_state.session_id, rx_bytes, tx_bytes);
         }
 
         //如果下次上报时间小于当前时间，则需要更新下次上报时间
@@ -2016,8 +2026,8 @@ void parse_http_url(const char *url, char *host, int *port, char *path)
 size_t write_callback(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     size_t expected_bytes;
     size_t wirtten = 0;
-    HLK_LOG_INFO("write_callback size:%d, nmemb:%d\n", size, nmemb);
-    HLK_LOG_INFO("ptr:%s\n", ptr);
+    //HLK_LOG_INFO("write_callback size:%d, nmemb:%d\n", size, nmemb);
+    //HLK_LOG_INFO("ptr:%s\n", ptr);
 
     // 检查输入参数的有效性
     if (!ptr || !stream || size == 0 || nmemb == 0) {
@@ -2142,7 +2152,7 @@ void set_post_headers(M_HTTP_POST_HEADERS_S *p_m_h_post_headers)
     sprintf(p_m_h_post_headers->acSignature, "Signature: %s", acFinalKey);         // 数字签名
 
     return;
-}
+} 
 
 /******************************************************************************
  * 函数名    : set_post_body
@@ -2194,7 +2204,7 @@ void consolidated_file_removes_checksum(FILE *targetFile)
 
     // 确保数据写入磁盘
     if(targetFile)
-        fflush(targetFile);
+        fflush(targetFile); 
         
     // 关闭源文件
     if(sourceFile){
@@ -2822,7 +2832,7 @@ static void hlk_mqtt_handle_ota(MessageData *data)
         app_msleep(5000);
         
         // 重启设备以完成升级
-        app_reboot();
+        //app_reboot();
     }else{
         // 下载失败，向云端报告错误
         hlk_mqtt_report_version(HLK_OTA_FLASH_CHECK_ERR, 0, g_ota_msgid);

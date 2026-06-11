@@ -116,9 +116,9 @@ void openwrt_upgrade_firmware(void)
             
             // 直接执行 sysupgrade，避免 shell
             execl("/sbin/sysupgrade", "sysupgrade", 
-                  "-n",  // 不保存配置
+                  "-q",  // 不保存配置
                   SYSUPGRADE_BIN_PATH_TMP, 
-                  (char *)NULL);
+                  (char *)NULL); 
             
             // 如果 execl 失败，记录日志并退出
             HLK_LOG_ERR("execl sysupgrade failed\r\n");
