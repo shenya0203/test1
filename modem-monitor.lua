@@ -6,6 +6,11 @@ local INTERFACE = "lte"
 local INFO_FILE = "/tmp/modem_info.json"
 local STATUS_FILE = "/tmp/modem_status.json"
 local BLOCK_FILE = "/tmp/internal_sim_blocked.json"
+local PROBE_FILE = "/tmp/hlk_modem_probe.json"
+local PROBE_INTERVAL_SEC = 900      -- 15 分钟一轮试探
+local PROBE_PHASE_EXTERNAL_SEC = 180 -- 外置重拨 3 分钟
+local PROBE_PHASE_INTERNAL_SEC = 300 -- 内置临时试探 5 分钟
+local PROBE_PHASE_RADIO_SEC = 300    -- 仅内置卡开射频 5 分钟
 local CHECK_INTERVAL = 15
 local FAIL_THRESHOLD = 10   -- 长周期重拨阈值
 local SWITCH_FAIL_LIMIT = 3 -- 模式3自动切卡阈值
@@ -29,8 +34,19 @@ local state = {
     imei = "N/A",
     is_internal_switching = false,
     session_id = os.time() % 100000, -- 初始随时间戳，后递增
-    internal_blocked = false,        -- 流量超限标记
-    is_internal_flight_mode = false, -- 内置卡飞行模式标记--
+    internal_blocked = false,        -- 流量超限标记（只读 BLOCK_FILE）
+    is_internal_flight_mode = false, -- 内置卡飞行模式标记
+    probe = {
+        latched_internal = false,
+        active = false,
+        phase = "idle",
+        override = false,
+        home_slot = 0,
+        started_at = 0,
+        deadline = 0,
+        last_probe_at = 0,
+        last_result = "idle",
+    },
     slots = {
         ["0"] = { iccid = "N/A", imsi = "N/A" },
         ["1"] = { iccid = "N/A", imsi = "N/A" }
@@ -118,6 +134,129 @@ local function check_internal_block()
         end
         state.internal_blocked = false
     end
+end
+
+local function probe_override_active()
+    return state.probe.override == true
+end
+
+local function probe_skip_block_enforcement()
+    if probe_override_active() then return true end
+    if state.probe.active and state.probe.phase == "radio_up" then return true end
+    return false
+end
+
+local function load_probe_state()
+    local f = io.open(PROBE_FILE, "r")
+    if not f then return end
+    local content = f:read("*a")
+    f:close()
+    if not content or content == "" then return end
+
+    state.probe.latched_internal = content:find('"latched_internal"%s*:%s*true') ~= nil
+    state.probe.active = content:find('"probe_active"%s*:%s*true') ~= nil
+    local phase = content:match('"probe_phase"%s*:%s*"([^"]+)"')
+    state.probe.phase = phase or "idle"
+    state.probe.override = content:find('"probe_override"%s*:%s*true') ~= nil
+    state.probe.home_slot = tonumber(content:match('"home_slot"%s*:%s*(%d+)')) or state.probe.home_slot
+    state.probe.started_at = tonumber(content:match('"probe_started_at"%s*:%s*(%d+)')) or 0
+    state.probe.deadline = tonumber(content:match('"probe_deadline"%s*:%s*(%d+)')) or 0
+    state.probe.last_probe_at = tonumber(content:match('"last_probe_at"%s*:%s*(%d+)')) or 0
+    local last_result = content:match('"last_result"%s*:%s*"([^"]+)"')
+    state.probe.last_result = last_result or "idle"
+end
+
+local function save_probe_state()
+    local payload = string.format(
+        '{"latched_internal":%s,"probe_active":%s,"probe_phase":"%s","probe_override":%s,"home_slot":%d,"probe_started_at":%d,"probe_deadline":%d,"last_probe_at":%d,"last_result":"%s"}',
+        state.probe.latched_internal and "true" or "false",
+        state.probe.active and "true" or "false",
+        state.probe.phase,
+        state.probe.override and "true" or "false",
+        state.probe.home_slot,
+        state.probe.started_at,
+        state.probe.deadline,
+        state.probe.last_probe_at,
+        state.probe.last_result
+    )
+    local f = io.open(PROBE_FILE, "w")
+    if not f then return end
+    f:write(payload)
+    f:close()
+end
+
+local function reset_probe_state(result)
+    state.probe.active = false
+    state.probe.phase = "idle"
+    state.probe.override = false
+    state.probe.started_at = 0
+    state.probe.deadline = 0
+    state.probe.last_result = result or "idle"
+    save_probe_state()
+end
+
+local function probe_interval_elapsed(now)
+    if state.probe.last_probe_at == 0 then return true end
+    return (now - state.probe.last_probe_at) >= PROBE_INTERVAL_SEC
+end
+
+local function probe_begin_phase(phase, deadline, override, result)
+    state.probe.active = true
+    state.probe.phase = phase
+    state.probe.override = override == true
+    state.probe.started_at = os.time()
+    state.probe.deadline = deadline
+    state.probe.last_result = result or phase
+    save_probe_state()
+end
+
+local function probe_end_phase(result)
+    state.probe.override = false
+    state.probe.active = false
+    state.probe.phase = "idle"
+    state.probe.started_at = 0
+    state.probe.deadline = 0
+    state.probe.last_result = result or "done"
+    save_probe_state()
+end
+
+local function probe_mark_attempt(now, result)
+    state.probe.last_probe_at = now
+    state.probe.last_result = result or state.probe.last_result
+    save_probe_state()
+end
+
+local function probe_latch_internal_blocked()
+    if state.probe.latched_internal then return end
+    state.probe.latched_internal = true
+    state.probe.home_slot = state.current_slot
+    save_probe_state()
+    log("内置卡流量超限，进入试探状态机（home_slot=" .. state.probe.home_slot .. "）")
+end
+
+local function probe_clear_latch()
+    if not state.probe.latched_internal and not state.probe.active and not state.probe.override then return end
+    state.probe.latched_internal = false
+    reset_probe_state("unblocked")
+    log("内置卡流量限制已解除，退出试探状态机")
+end
+
+local function probe_set_radio_up()
+    if state.is_internal_flight_mode then
+        log("试探：内置卡开射频（CFUN=1）")
+        send_at("AT+CFUN=1")
+        state.is_internal_flight_mode = false
+    end
+    os.execute(string.format("ubus call network.interface.%s up 2>/dev/null", INTERFACE))
+end
+
+local function probe_set_radio_down()
+    if not state.is_internal_flight_mode then
+        log("试探结束：内置卡关射频（CFUN=0）")
+        send_at("AT+CFUN=0")
+        state.is_internal_flight_mode = true
+    end
+    os.execute(string.format("ubus call network.interface.%s down 2>/dev/null", INTERFACE))
 end
 
 -- --- 自动探测 4G 模组的 AT 串口 ---
@@ -368,6 +507,124 @@ local function perform_slot_switch(target)
     state.current_slot = tonumber(resp_slot and resp_slot:match(":%s*(%d)")) or -1
 end
 
+local function probe_start_external_redial(now)
+    log("双卡离线：外置重拨试探 " .. PROBE_PHASE_EXTERNAL_SEC .. " 秒")
+    if state.current_slot ~= 0 then
+        perform_slot_switch(0)
+    end
+    os.execute(string.format("ubus call network.interface.%s down 2>/dev/null", INTERFACE))
+    os.execute(string.format("ubus call network.interface.%s up 2>/dev/null", INTERFACE))
+    probe_begin_phase("external_redial", now + PROBE_PHASE_EXTERNAL_SEC, false, "external_redial")
+    probe_mark_attempt(now, "external_redial")
+end
+
+local function manage_dual_flow_probe(now, allow_internal_trial)
+    if state.probe.active then
+        if state.probe.phase == "internal_trial" then
+            if not allow_internal_trial then
+                log("内置已解封，结束内置试探并切回外置")
+                perform_slot_switch(state.probe.home_slot)
+                probe_end_phase("unblocked")
+                return
+            end
+            if now >= state.probe.deadline then
+                check_internal_block()
+                if state.internal_blocked then
+                    log("内置试探结束仍 block，切回外置卡 slot " .. state.probe.home_slot)
+                    perform_slot_switch(state.probe.home_slot)
+                    probe_mark_attempt(now, "internal_still_blocked")
+                    probe_end_phase("internal_still_blocked")
+                else
+                    log("内置试探成功，流量限制已解除")
+                    if state.modem_simnum == 0 then
+                        perform_slot_switch(0)
+                    end
+                    probe_mark_attempt(now, "internal_unblocked")
+                    probe_end_phase("internal_unblocked")
+                end
+            end
+            return
+        end
+
+        if state.probe.phase == "external_redial" then
+            if now >= state.probe.deadline then
+                check_internal_block()
+                if allow_internal_trial and state.internal_blocked then
+                    log("外置重拨窗口结束仍离线且内置仍 block，进入内置临时试探")
+                    perform_slot_switch(1)
+                    probe_begin_phase("internal_trial", now + PROBE_PHASE_INTERNAL_SEC, true, "internal_trial")
+                else
+                    probe_mark_attempt(now, "external_only")
+                    probe_end_phase("external_only")
+                end
+            end
+            return
+        end
+    end
+
+    if not probe_interval_elapsed(now) then return end
+    probe_start_external_redial(now)
+end
+
+local function manage_flow_probe()
+    load_probe_state()
+    check_internal_block()
+
+    local now = os.time()
+    local simnum = state.modem_simnum
+    local lte_online = state.data.mwan_stat == "online"
+    local dual_mode = simnum == 0 or simnum == 3
+
+    if dual_mode and lte_online then
+        if state.probe.active or state.probe.override then
+            probe_end_phase("online_recovered")
+        end
+        return
+    end
+
+    if not state.internal_blocked then
+        if state.probe.latched_internal or state.probe.override then
+            probe_clear_latch()
+        end
+        if dual_mode and not lte_online then
+            manage_dual_flow_probe(now, false)
+        end
+        return
+    end
+
+    probe_latch_internal_blocked()
+
+    if dual_mode then
+        manage_dual_flow_probe(now, true)
+        return
+    end
+
+    if simnum == 1 then
+        if lte_online then
+            if state.probe.active then
+                probe_end_phase("online_recovered")
+            end
+            return
+        end
+
+        if state.probe.active then
+            if now >= state.probe.deadline then
+                probe_set_radio_down()
+                probe_mark_attempt(now, "radio_timeout")
+                probe_end_phase("radio_timeout")
+            end
+            return
+        end
+
+        if not probe_interval_elapsed(now) then return end
+
+        log("仅内置卡：流量超限且离线，开射频试探 " .. PROBE_PHASE_RADIO_SEC .. " 秒")
+        probe_set_radio_up()
+        probe_begin_phase("radio_up", now + PROBE_PHASE_RADIO_SEC, false, "radio_up")
+        probe_mark_attempt(now, "radio_up")
+    end
+end
+
 -- --- 采集指定卡槽的元数据 (ICCID/IMSI) ---
 local function collect_slot_metadata(slot_id)
     if not slot_id or slot_id == -1 then return end
@@ -499,8 +756,9 @@ local function collect_network_data()
         end
         return false
     else
-        --外置卡优先，当前卡为外置卡 且内置卡未被阻断
-        if state.modem_simnum == 0 and state.current_slot == 0 and not state.internal_blocked then
+        -- 外置卡优先：SIM 未就绪时尝试切内置；block 时仅 probe_override 允许
+        if state.modem_simnum == 0 and state.current_slot == 0
+            and (not state.internal_blocked or probe_override_active()) then
             perform_slot_switch(1)
             return true
         end
@@ -581,7 +839,7 @@ end
 local function handle_redial_and_switch_logic()
     -- 首先检查阻断强制执行：如果当前是内置卡且被阻断，立即切走
     -- 如果当前配置不是仅内置卡 且 当前卡槽使用的是内置卡
-    if state.current_slot == 1 and state.internal_blocked then
+    if state.current_slot == 1 and state.internal_blocked and not probe_skip_block_enforcement() then
         log("CRITICAL: Internal SIM blocked! Forcing switch to External SIM...")
 
         if state.modem_simnum == 1 then
@@ -602,7 +860,7 @@ local function handle_redial_and_switch_logic()
             if state.net_offline_count >= SWITCH_FAIL_LIMIT then
                 local next_slot = (state.current_slot == 0) and 1 or 0
                 -- 拦截：如果要跳往内置卡但被阻断
-                if next_slot == 1 and state.internal_blocked then
+                if next_slot == 1 and state.internal_blocked and not probe_override_active() then
                     log("Switch to SIM1 (Internal) ABORTED: SIM is blocked.")
                 else
                     log("Backup switch triggered!")
@@ -612,7 +870,7 @@ local function handle_redial_and_switch_logic()
             end
         elseif state.modem_simnum == 0 and state.current_slot == 0 then --外置卡优先 且 当前正在使用外置卡
             -- 模式 0 故障回退内置卡，同样需要拦截
-            if state.internal_blocked then
+            if state.internal_blocked and not probe_override_active() then
                 log("Fallback to SIM1 DENIED: SIM is blocked.")
             else
                 log("Mode 0 fallback to SIM1 triggered.")
@@ -861,6 +1119,7 @@ local function monitor_main()
             -- 阶段 2: 事件记录与基础状态
             --handle_sim_slot_change_event()
             collect_modem_status()
+            manage_flow_probe()
 
             -- 阶段 3: 详细数据采集
             if collect_network_data() then

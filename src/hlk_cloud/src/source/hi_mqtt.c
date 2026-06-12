@@ -1864,26 +1864,33 @@ static void hlk_mqtt_handle_ping_reply(MessageData *data)
 
         if (sharedData.flowtype == 0) {
             if (sharedData.current_month_flow >= sharedData.flowsize) {
-                //处于停机状态
                 if (sharedData.isblocked == 0) {
-                    //需要停机
                     sim_traffic_write_block_request();
-                    HLK_LOG_INFO("套餐流量已达到上限，需要停机\n");
+                    HLK_LOG_INFO("月套餐流量已达到上限，需要停机\n");
                 } else {
-                    HLK_LOG_INFO("套餐流量已达到上限，已停机\n");
-                } 
+                    HLK_LOG_INFO("月套餐流量已达到上限，已停机\n");
+                }
             } else {
                 if (sharedData.isblocked == 1) {
-                    //解卡
                     sim_traffic_clear_block();
-                    HLK_LOG_INFO("套餐流量已解锁\n");
+                    HLK_LOG_INFO("月套餐流量已解锁\n");
+                }
+            }
+        } else if (sharedData.flowtype == 1) {
+            if (sharedData.current_year_flow >= sharedData.flowsize) {
+                if (sharedData.isblocked == 0) {
+                    sim_traffic_write_block_request();
+                    HLK_LOG_INFO("年套餐流量已达到上限，需要停机\n");
                 } else {
-                    HLK_LOG_INFO("套餐流量未解锁\n");
+                    HLK_LOG_INFO("年套餐流量已达到上限，已停机\n");
+                }
+            } else {
+                if (sharedData.isblocked == 1) {
+                    sim_traffic_clear_block();
+                    HLK_LOG_INFO("年套餐流量已解锁\n");
                 }
             }
         }
-
-        //是否可以通过sharedData.flowsize 和 sharedData.current_month_flow 对比 判断是否已经解卡了
 
         HLK_LOG_INFO("FlowType: %d, FlowSize: %f, Current_Month_Flow: %f, Current_Year_Flow: %f, Current_Flow_Year: %d, Current_Month: %d\n", 
             sharedData.flowtype, sharedData.flowsize, sharedData.current_month_flow, sharedData.current_year_flow, sharedData.current_flow_year, sharedData.current_month);
@@ -1989,29 +1996,19 @@ static void hlk_mqtt_handle_flow_update_confirm(MessageData *data)
             }
 
             // 根据云端确认的套餐流量判断是否通知守护进程禁止内置卡继续联网。
-            if (sharedData.flowtype == 0 && CurrentMonthFlow != NULL) { //每月清空流量
+            if (sharedData.flowtype == 0 && CurrentMonthFlow != NULL) {
                 sim_traffic_clear_state();
 
-                if (CurrentMonthFlow->valuedouble > sharedData.flowsize) {
-                    SIM_MODEM_STATUS_S modem_status = {0};
-
+                if (CurrentMonthFlow->valuedouble >= sharedData.flowsize) {
                     HLK_LOG_INFO("[SIM_TRAFFIC] internal sim flow limit reached by month\n");
-                    if (sim_traffic_read_modem_status(&modem_status) == 0 &&
-                        sim_traffic_is_internal_connected(&modem_status)) {
-                        sim_traffic_write_block_request();
-                    }
+                    sim_traffic_write_block_request();
                 }
-            } else if (sharedData.flowtype == 1 && CurrentYearFlow != NULL) { //每年清空流量
+            } else if (sharedData.flowtype == 1 && CurrentYearFlow != NULL) {
                 sim_traffic_clear_state();
 
-                if (CurrentYearFlow->valuedouble > sharedData.flowsize) {
-                    SIM_MODEM_STATUS_S modem_status = {0};
-
+                if (CurrentYearFlow->valuedouble >= sharedData.flowsize) {
                     HLK_LOG_INFO("[SIM_TRAFFIC] internal sim flow limit reached by year\n");
-                    if (sim_traffic_read_modem_status(&modem_status) == 0 &&
-                        sim_traffic_is_internal_connected(&modem_status)) {
-                        sim_traffic_write_block_request();
-                    }
+                    sim_traffic_write_block_request();
                 }
             }
 
