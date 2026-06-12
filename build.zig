@@ -160,7 +160,7 @@ fn createPlatformBuildStep(b: *std.Build, platform: PlatformConfig, mod: *std.Bu
 
     // 对于交叉编译，允许未定义符号（动态库在目标系统上提供）
     exe.linker_allow_shlib_undefined = true;
-
+    //exe.lto = .full;
     // 头文件依赖已在上面添加
 
     // 添加C源文件

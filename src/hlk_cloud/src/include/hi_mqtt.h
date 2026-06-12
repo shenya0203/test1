@@ -156,6 +156,7 @@ typedef struct
     double current_year_flow;   //当前流量快照  这个当前年份已经使用的流量 如果FlowType == 1 就通过这个字段判断是否超出了当前套餐的流量
     int current_flow_year;     //当前流量快照所属年份
     int current_month;         //当前流量快照所属月份
+    int isblocked;             //内置卡是否被阻断 0:未阻断 1:阻断
 }SHARED_DATA_S;
 
 /* 海凌科iot云操作对象 */
