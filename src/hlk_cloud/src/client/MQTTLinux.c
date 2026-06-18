@@ -201,10 +201,10 @@ int NetworkConnect(Network* n, char* addr, int port)
 	int retVal = -1;
 
     struct hostent *hostinfo = gethostbyname(addr);
-	HLK_LOG_INFO("NetworkConnect\n");
+	//HLK_LOG_INFO("NetworkConnect\n");
 	if(hostinfo == NULL)
 	{
-		HLK_LOG_ERR("hostinfo == NULL\n");
+		//HLK_LOG_ERR("hostinfo == NULL\n");
 		return retVal;
 	}
     sAddr.sin_family = AF_INET;
@@ -216,7 +216,7 @@ int NetworkConnect(Network* n, char* addr, int port)
 	tmp_addr.s_addr = address;  // 将 uint32_t 赋值给 s_addr
 	char *ip = inet_ntoa(tmp_addr);
     // char *ip = inet_ntoa(address);
-    HLK_LOG_INFO("Server ip Address : %s\r\n", ip);
+    //HLK_LOG_INFO("Server ip Address : %s\r\n", ip);
 
 	if ((n->my_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0){
 		HLK_LOG_ERR("my_socket--->errr\r\n");
@@ -243,10 +243,10 @@ int NetworkConnect(Network* n, char* addr, int port)
 	// printf("-----------------%s %d  %d %d\n",__func__,__LINE__,recvbuf,len);
 	// recvbuf = 200;
 	// getsockopt( n->my_socket, SOL_SOCKET, SO_RCVBUF, &recvbuf, &len );
-	HLK_LOG_INFO("start_Connect--------->\r\n");
+	//HLK_LOG_INFO("start_Connect--------->\r\n");
 	if ((retVal = connect(n->my_socket, (const struct sockaddr *)&sAddr, sizeof(sAddr))) < 0)
 	{
-		HLK_LOG_ERR("Connect err\n");
+		//HLK_LOG_ERR("Connect err\n");
 		close(n->my_socket);
 	    goto exit;
 	}

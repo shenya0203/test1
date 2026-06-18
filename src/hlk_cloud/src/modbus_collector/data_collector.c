@@ -484,7 +484,7 @@ static void parse_cloud_content(collector_ctx_t *ctx, cJSON *root, const char *f
                 continue;
             }
 
-            HLK_LOG_INFO("[Collector] 添加点位: 设备=%s, 点位=%s\n", dev_name, pt->valuestring);
+            //HLK_LOG_DEBUG("[Collector] 添加点位: 设备=%s, 点位=%s\n", dev_name, pt->valuestring);
             add_target_point(ctx, dev_name, pt->valuestring);
             added++;
             device_added++;
@@ -850,7 +850,7 @@ void collector_sync_data(collector_ctx_t *ctx)
     for (int i = 0; i < ctx->target_count; i++) {
         if (ctx->targets[i].shm_absolute_index >= 0) {
             ctx->targets[i].current_value = shm->data[ctx->targets[i].shm_absolute_index];
-            HLK_LOG_INFO("[Collector] %s.%s = %f\n", ctx->targets[i].device_name, ctx->targets[i].point_name, ctx->targets[i].current_value);
+            //HLK_LOG_DEBUG("[Collector] %s.%s = %f\n", ctx->targets[i].device_name, ctx->targets[i].point_name, ctx->targets[i].current_value);
         }
     }
 }
@@ -917,7 +917,7 @@ static int should_report_data(collector_ctx_t *ctx)
 // 准备上报数据（URL编码格式）
 static char* prepare_report_data_urlencoded(collector_ctx_t *ctx)
 {
-    HLK_LOG_INFO("[DATA_COLLECTOR] 开始准备上报数据\n");
+    //HLK_LOG_DEBUG("[DATA_COLLECTOR] 开始准备上报数据\n");
 
     if (!ctx || !ctx->targets || ctx->target_count <= 0) {
         HLK_LOG_INFO("[DATA_COLLECTOR] 参数无效 - ctx=%p, targets=%p, count=%d\n",
@@ -925,8 +925,7 @@ static char* prepare_report_data_urlencoded(collector_ctx_t *ctx)
         return NULL;
     }
 
-    HLK_LOG_INFO("[DATA_COLLECTOR] 配置名称=%s, 目标点位数量=%d\n",
-           ctx->report_config.name, ctx->target_count);
+    //HLK_LOG_DEBUG("[DATA_COLLECTOR] 配置名称=%s, 目标点位数量=%d\n",ctx->report_config.name, ctx->target_count);
 
     // 估算字符串长度：时间戳(25) + 每个点位的空间(设备名50 + 点位名50 + 数值25 + 分隔符5) * 点位数
     // 额外预留设备DN标签的空间
@@ -935,12 +934,12 @@ static char* prepare_report_data_urlencoded(collector_ctx_t *ctx)
         estimated_len += 50 + 50 + 25 + 5; // DN=设备名&点位名=数值&
     }
 
-    HLK_LOG_INFO("[DATA_COLLECTOR] 预估字符串长度=%zu\n", estimated_len);
+    //HLK_LOG_DEBUG("[DATA_COLLECTOR] 预估字符串长度=%zu\n", estimated_len);
 
     // 分配内存
     char *result = (char*)malloc(estimated_len);
     if (!result) {
-        HLK_LOG_INFO("[DATA_COLLECTOR] 内存分配失败\n");
+        //HLK_LOG_INFO("[DATA_COLLECTOR] 内存分配失败\n");
         return NULL;
     }
 
@@ -954,7 +953,7 @@ static char* prepare_report_data_urlencoded(collector_ctx_t *ctx)
     snprintf(time_str, sizeof(time_str), "time=%lld&", now);
     strncat(result, time_str, estimated_len - current_len - 1);
     current_len = strlen(result);
-    HLK_LOG_INFO("[DATA_COLLECTOR] 添加时间戳 time=%lld\n", now);
+    //HLK_LOG_DEBUG("[DATA_COLLECTOR] 添加时间戳 time=%lld\n", now);
 
     // 用于跟踪当前设备
     char current_device[50] = "";
@@ -990,8 +989,7 @@ static char* prepare_report_data_urlencoded(collector_ctx_t *ctx)
         strncat(result, point_str, estimated_len - current_len - 1);
         current_len = strlen(result);
 
-        HLK_LOG_INFO("[DATA_COLLECTOR] 添加点位 %s=%.*f\n",
-               target->point_name, (int)target->decimal_places, target->current_value);
+        //HLK_LOG_DEBUG("[DATA_COLLECTOR] 添加点位 %s=%.*f\n", target->point_name, (int)target->decimal_places, target->current_value);
     }
 
     // 移除最后一个&符号
@@ -1000,8 +998,8 @@ static char* prepare_report_data_urlencoded(collector_ctx_t *ctx)
         current_len--;
     }
 
-    HLK_LOG_INFO("[DATA_COLLECTOR] 数据准备完成，最终长度=%zu\n", current_len);
-    HLK_LOG_INFO("[DATA_COLLECTOR] 结果: %s\n", result);
+    //HLK_LOG_DEBUG("[DATA_COLLECTOR] 数据准备完成，最终长度=%zu\n", current_len);
+    //HLK_LOG_DEBUG("[DATA_COLLECTOR] 结果: %s\n", result);
 
     // 构建JSON格式数据
     cJSON *root = cJSON_CreateObject();
@@ -1053,7 +1051,7 @@ static char* prepare_report_data_urlencoded(collector_ctx_t *ctx)
     // 生成JSON字符串
     response_str = cJSON_PrintUnformatted(root);
     if (!response_str) {
-        HLK_LOG_INFO("[DATA_COLLECTOR] 生成JSON字符串失败\n");
+        HLK_LOG_DEBUG("[DATA_COLLECTOR] 生成JSON字符串失败\n");
         cJSON_Delete(root);
         free(result);
         return NULL;
@@ -1070,7 +1068,7 @@ static char* prepare_report_data_urlencoded(collector_ctx_t *ctx)
 // 准备上报数据（JSON格式）- 保留原有函数用于兼容性
 static char* prepare_report_data(collector_ctx_t *ctx)
 {
-    HLK_LOG_INFO("[DATA_COLLECTOR] prepare_report_data: 开始准备上报数据\n");
+    //HLK_LOG_INFO("[DATA_COLLECTOR] prepare_report_data: 开始准备上报数据\n");
     //上报数据格式
     /*
     上报数据格式：DN=DeviceName1&node0101=123&node2=xxx&node3=xxx&DN=xx&node1=xxx&node2=xxx
@@ -1089,7 +1087,7 @@ static int collector_do_report_data(collector_ctx_t *ctx, const char *reason)
         return -1;
     }
 
-    HLK_LOG_INFO("[Collector] Start report, reason: %s\n", reason ? reason : "unknown");
+    //HLK_LOG_DEBUG("[Collector] Start report, reason: %s\n", reason ? reason : "unknown");
     collector_sync_data(ctx);
 
     // ==========================================
@@ -1100,7 +1098,7 @@ static int collector_do_report_data(collector_ctx_t *ctx, const char *reason)
         HLK_LOG_ERR("[Collector] Report error: failed to prepare data\n");
         return -1;
     }
-    HLK_LOG_INFO("[Collector] Report data: %s\n", report_data);
+    //HLK_LOG_DEBUG("[Collector] Report data: %s\n", report_data);
 
     int realtime_send_success = 0;
 
@@ -1110,29 +1108,28 @@ static int collector_do_report_data(collector_ctx_t *ctx, const char *reason)
     if (sharedData.connect_status == MQTT_CONNECT_STATUS_CONNECTED) {
 
         
-        HLK_LOG_INFO("[Collector] MQTT connected, attempting to send realtime data...\n");
+        //HLK_LOG_INFO("[Collector] MQTT connected, attempting to send realtime data...\n");
         #if 1
         int rc = hlk_mqtt_publish(mqtt_topic_type_table[TOPIC_POST].topic, QOS0, report_data, strlen(report_data));
         if (rc == 0) {
-            HLK_LOG_INFO("[Collector] Realtime data sent successfully\n");
+            //HLK_LOG_DEBUG("[Collector] Realtime data sent successfully\n");
             realtime_send_success = 1;
         } else {
             HLK_LOG_ERR("[Collector] Failed to send realtime data (rc=%d)\n", rc);
         }
         #endif
     } else {
-        HLK_LOG_ERR("[Collector] MQTT not connected (status=%d), skipping realtime send\n",
-               sharedData.connect_status);
+        //HLK_LOG_ERR("[Collector] MQTT not connected (status=%d), skipping realtime send\n", sharedData.connect_status);
     }
 
     // ==========================================
     // 步骤 C：处理缓存（仅在实时发送成功后执行）
     // ==========================================
     if (realtime_send_success) {
-        HLK_LOG_INFO("[Collector] Processing cache data...\n");
+        //HLK_LOG_DEBUG("[Collector] Processing cache data...\n");
         //flush_one_cache_file();
     } else {
-        HLK_LOG_ERR("[Collector] Skipping cache processing (realtime send failed)\n");
+       //HLK_LOG_ERR("[Collector] Skipping cache processing (realtime send failed)\n");
     }
 
     #if 0
@@ -1168,7 +1165,7 @@ int collector_report_data(collector_ctx_t *ctx)
         //printf("[Collector] Skip report: conditions not met\n");
         return 1; // 1 表示 skip
     }
-    HLK_LOG_INFO("[Collector] should_report_data: 1\n");
+    //HLK_LOG_DEBUG("[Collector] should_report_data: 1\n");
 
     return collector_do_report_data(ctx, "period_or_timed");
 }
@@ -1185,7 +1182,7 @@ int collector_register_signal_report_handler(void)
         return -1;
     }
 
-    HLK_LOG_INFO("[Collector] SIGUSR1 report handler registered\n");
+    //HLK_LOG_DEBUG("[Collector] SIGUSR1 report handler registered\n");
     return 0;
 }
 

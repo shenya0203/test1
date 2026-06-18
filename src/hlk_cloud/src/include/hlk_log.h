@@ -16,12 +16,9 @@
 
 #include <syslog.h>
 
-#ifndef HLK_LOG_TAG
-#define HLK_LOG_TAG "hlk_cloud"
-#endif
 
 #ifndef HLK_LOG_PREFIX
-#define HLK_LOG_PREFIX "[" HLK_LOG_TAG "] "
+#define HLK_LOG_PREFIX ""
 #endif
 
 /* 定义 HLK_LOG_STRIP_DEBUG 可在编译期完全去掉 DEBUG 级别（零开销） */

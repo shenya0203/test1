@@ -199,8 +199,8 @@ struct MemoryStruct {
 #define SIM_TRAFFIC_BLOCK_PATH "/tmp/internal_sim_blocked.json"
 #define SIM_TRAFFIC_BLOCK_TMP_PATH "/tmp/internal_sim_blocked.json.tmp"
 #define SIM_TRAFFIC_SAMPLE_INTERVAL_SEC 60
-#define SIM_TRAFFIC_REPORT_MIN_INTERVAL_SEC (15 * 2)
-#define SIM_TRAFFIC_REPORT_MAX_INTERVAL_SEC (30 * 2)
+#define SIM_TRAFFIC_REPORT_MIN_INTERVAL_SEC (15 * 60)
+#define SIM_TRAFFIC_REPORT_MAX_INTERVAL_SEC (30 * 60)
 #define SIM_TRAFFIC_COUNTER_MAX 0xFFFFFFFFULL
 #define SIM_TRAFFIC_MAX_BYTES_PER_SEC (1ULL * 1024ULL * 1024ULL)    //最大速率 1M/s
 #define SIM_TRAFFIC_STATE_VERSION 3
@@ -442,11 +442,13 @@ int get_mqtt_user_certification_h()
     strcpy(mqtt_user_cert.deviceSecret, deviceSecret);
 
     // 打印认证信息用于调试
+    #if 0
     HLK_LOG_INFO("projectID: %s\n", mqtt_user_cert.projectID);    
     HLK_LOG_INFO("productKey: %s\n", mqtt_user_cert.productKey);    
     HLK_LOG_INFO("productSecret: %s\n", mqtt_user_cert.productSecret);    
     HLK_LOG_INFO("deviceName: %s\n", mqtt_user_cert.deviceName);    
     HLK_LOG_INFO("deviceSecret: %s\n", mqtt_user_cert.deviceSecret);   
+    #endif
 
     return 0;
 }
@@ -497,7 +499,7 @@ int hlk_mqtt_publish(char *topic, int qos, void *data, int len)
     pubmsg.payloadlen = len;   // 载荷数据长度
     pubmsg.dup = 0;           // 非重复消息
 
-    HLK_LOG_INFO("#### Topic: %s Data: %s\n", topic, (char*)data);
+    HLK_LOG_INFO("Topic: %s Data: %s\n", topic, (char*)data);
 
     // 调用MQTT库发布消息
     return MQTTPublish(hlk_iot.client, topic, &pubmsg);
@@ -801,7 +803,6 @@ static int sim_traffic_save_state(const SIM_TRAFFIC_STATE_S *state)
     if (str == NULL) {
         goto exit;
     }
-    HLK_LOG_DEBUG("[SIM_TRAFFIC] save state: %s\n", str);
 
     fp = fopen(SIM_TRAFFIC_STATE_PATH, "w");
     if (fp == NULL) {
@@ -857,8 +858,6 @@ static int sim_traffic_init(unsigned long long uptime_sec, const SIM_MODEM_STATU
         //保存流量统计状态
         sim_traffic_save_state(&g_sim_traffic_state);
 
-        HLK_LOG_INFO("[SIM_TRAFFIC] load state from %s\n", SIM_TRAFFIC_STATE_PATH);
-
         return 0;
     }
 
@@ -908,8 +907,8 @@ static int sim_traffic_sample(unsigned long long uptime_sec, const SIM_MODEM_STA
         elapsed_sec = SIM_TRAFFIC_SAMPLE_INTERVAL_SEC;
     }
 
-    rx_delta = sim_traffic_calc_delta(rx_bytes, g_sim_traffic_state.last_rx_bytes, elapsed_sec);
-    tx_delta = sim_traffic_calc_delta(tx_bytes, g_sim_traffic_state.last_tx_bytes, elapsed_sec);
+    rx_delta = sim_traffic_calc_delta(rx_bytes, g_sim_traffic_state.last_rx_bytes, elapsed_sec) - 28;
+    tx_delta = sim_traffic_calc_delta(tx_bytes, g_sim_traffic_state.last_tx_bytes, elapsed_sec) - 28;
 
     g_sim_traffic_state.total_rx_bytes += rx_delta;
     g_sim_traffic_state.total_tx_bytes += tx_delta;
@@ -924,6 +923,29 @@ static int sim_traffic_sample(unsigned long long uptime_sec, const SIM_MODEM_STA
     return 0;
 }
 
+int sim_traffic_next_month_proc(void)
+{
+    int current_month = zig_get_month();
+    int current_year = zig_get_year();
+
+    HLK_LOG_ERR("current_month: %d heartbeat Year: %d\n", current_month, sharedData.current_month);
+    HLK_LOG_ERR("current_year: %d heartbeat month:%d\n", current_year, sharedData.current_flow_year);
+
+    //云端下发的月份是从1开始的 1~12
+    if (sharedData.current_month != current_month) {
+
+        HLK_LOG_ERR("进入次月\n");
+
+        return 1;
+    } else if (sharedData.current_flow_year != current_year) {
+        //次年
+        HLK_LOG_ERR("进入次年\n");
+        return 2;
+    }
+
+    return 0;
+}
+
 static int sim_traffic_report(void)
 {
     int ret = -1;
@@ -931,8 +953,20 @@ static int sim_traffic_report(void)
     char *str = NULL;
 
     unsigned long long total_bytes = 0;
+
+    if (sim_traffic_next_month_proc()) {
+        //触发心跳 
+        hlk_mqtt_ping(1);
+        return 0;
+    }
+
     total_bytes = sharedData.current_month_flow + (g_sim_traffic_state.total_rx_bytes + g_sim_traffic_state.total_tx_bytes)/1024;
     //测试用
+    #if 0
+    do {
+        total_bytes = 1024010;
+    } while (0);
+    #endif
 
     HLK_LOG_INFO("[SIM_TRAFFIC] report total_byte: %llu KB\n", total_bytes);
 
@@ -947,7 +981,7 @@ static int sim_traffic_report(void)
     //S: 是否缩写。`0`=默认不缩写，`1`=允许使用缩写字段名
     cJSON_AddNumberToObject(root, "S", 1);
     //T: 流量所属时间，UTC 毫秒时间戳。补传跨月/跨年流量时建议必传，平台据此确定归档到哪一年哪一月
-    cJSON_AddNumberToObject(root, "T", zig_get_timestamp());
+    cJSON_AddNumberToObject(root, "T", zig_get_timestamp()*1000);
     //Flow: 设备所属月份的流量值。设备始终上报“该月份的最终流量值”。单位需与设备表 `CurrentMonthFlow/CurrentYearFlow` 保持一致，建议统一按 KB 存储
     cJSON_AddNumberToObject(root, "F", total_bytes);
 
@@ -1050,7 +1084,7 @@ exit:
     return ret;
 }
 
-static void sim_traffic_process(void)
+static void sim_traffic_process(int next)
 {
     unsigned long long uptime_sec = 0;
     SIM_MODEM_STATUS_S modem_status = {0};
@@ -1076,7 +1110,12 @@ static void sim_traffic_process(void)
     }
 
     if (!sim_traffic_is_internal_connected(&modem_status)) {
-        //HLK_LOG_ERR("[SIM_TRAFFIC] modem status not connected\n"); 
+        //HLK_LOG_ERR("[SIM_TRAFFIC] modem status not connected\n");  
+        return;
+    }
+
+    if (sharedData.isblocked) {
+        //如果超限 会主动ping带IMEI
         return;
     }
 
@@ -1086,7 +1125,7 @@ static void sim_traffic_process(void)
     }
 
     //如果上次采样时间大于当前时间，则需要重置流量统计状态
-    if (g_sim_traffic_state.last_sample_uptime > uptime_sec) {
+    if (g_sim_traffic_state.last_sample_uptime > uptime_sec) { //只能是重启
         //什么情形下 会出现这种情况？ uptime翻转 运行超过了32位时间的上限？
         HLK_LOG_ERR("[SIM_TRAFFIC] uptime moved backwards, reset runtime traffic state\n");
         g_sim_traffic_state.initialized = 0;
@@ -1101,14 +1140,12 @@ static void sim_traffic_process(void)
         }
     }
 
-    if (uptime_sec >= g_sim_traffic_state.next_report_uptime) {
+    if (uptime_sec >= g_sim_traffic_state.next_report_uptime || next) {
         //上报流量统计数据
         if (sharedData.connect_status == MQTT_CONNECT_STATUS_CONNECTED) {
             sim_traffic_report();
             g_sim_traffic_state.next_report_uptime = uptime_sec + sim_traffic_next_report_interval();
         }
-        //更新下次上报时间
-        //sim_traffic_save_state(&g_sim_traffic_state);
     }
 
     return;
@@ -1301,9 +1338,6 @@ void mqtt_topic_type_init()
                           mqtt_topic_type_table[topic_type].format);
             //HLK_LOG_INFO("mqtt_topic_type_table[%d].topic:%s\n", topic_type, 
                 //mqtt_topic_type_table[topic_type].topic);
-        }
-        else{
-            HLK_LOG_ERR("mqtt_topic_type_table format is NULL!!!!\n");
         }
     }
 
@@ -1857,47 +1891,84 @@ static void hlk_mqtt_handle_ping_reply(MessageData *data)
 
         sharedData.flowtype = flowtype_val->valueint;
         sharedData.flowsize = flowsize_val->valuedouble*1024;   //单位MB 转换为KB
+
         sharedData.current_month_flow = CurrentMonthFlow->valuedouble;
         sharedData.current_year_flow = CurrentYearFlow->valuedouble;
+
         sharedData.current_flow_year = CurrentFlowYear->valueint;
         sharedData.current_month = CurrentMonth->valueint;
 
-        if (sharedData.flowtype == 0) {
-            if (sharedData.current_month_flow >= sharedData.flowsize) {
-                if (sharedData.isblocked == 0) {
-                    sim_traffic_write_block_request();
-                    HLK_LOG_INFO("月套餐流量已达到上限，需要停机\n");
+        int is_next = 0;
+        if ((is_next = sim_traffic_next_month_proc()) != 0) {
+            sharedData.current_month_flow = 0;
+            HLK_LOG_INFO("进入次月\n");
+
+            if (is_next == 2) {
+                sharedData.current_year_flow = 0;
+                HLK_LOG_INFO("进入次年\n");
+            }
+            int current_month = zig_get_month();
+            int current_year = zig_get_year();
+        
+            //清零当月流量快照 并修改时间 report才可以上报 云端接收到后会通过时间判断是否是次月流量 触发云端更新流量套餐，仍需要再次获取心跳来更新数据
+            sharedData.current_flow_year = current_year;
+            sharedData.current_month = current_month;
+            sharedData.isnextmonth = 1;
+
+            //1. 触发上报
+            //2. 本地解锁
+            if (is_next == 2) { 
+
+            }
+            sim_traffic_clear_block();
+            HLK_LOG_INFO("次月套餐解锁\n");
+
+        } else {
+            if (sharedData.flowtype == 0) {
+                if (sharedData.current_month_flow >= sharedData.flowsize) {
+                    if (sharedData.isblocked == 0) {
+                        sim_traffic_write_block_request();
+                        HLK_LOG_INFO("月套餐流量已达到上限，需要停机\n");
+                    } else {
+                        HLK_LOG_INFO("月套餐流量已达到上限，已停机\n");
+                    }
                 } else {
-                    HLK_LOG_INFO("月套餐流量已达到上限，已停机\n");
+                    if (sharedData.isblocked == 1) {
+                        sim_traffic_clear_block();
+                        HLK_LOG_INFO("月套餐流量已解锁\n");
+                    }
                 }
-            } else {
-                if (sharedData.isblocked == 1) {
-                    sim_traffic_clear_block();
-                    HLK_LOG_INFO("月套餐流量已解锁\n");
+            } else if (sharedData.flowtype == 1) {
+                if (sharedData.current_year_flow >= sharedData.flowsize) {
+                    if (sharedData.isblocked == 0) {
+                        sim_traffic_write_block_request();
+                        HLK_LOG_INFO("年套餐流量已达到上限，需要停机\n");
+                    } else {
+                        HLK_LOG_INFO("年套餐流量已达到上限，已停机\n");
+                    }
+                } else {
+                    if (sharedData.isblocked == 1) {
+                        sim_traffic_clear_block();
+                        HLK_LOG_INFO("年套餐流量已解锁\n");
+                    }
                 }
             }
-        } else if (sharedData.flowtype == 1) {
-            if (sharedData.current_year_flow >= sharedData.flowsize) {
-                if (sharedData.isblocked == 0) {
-                    sim_traffic_write_block_request();
-                    HLK_LOG_INFO("年套餐流量已达到上限，需要停机\n");
-                } else {
-                    HLK_LOG_INFO("年套餐流量已达到上限，已停机\n");
-                }
-            } else {
-                if (sharedData.isblocked == 1) {
-                    sim_traffic_clear_block();
-                    HLK_LOG_INFO("年套餐流量已解锁\n");
-                }
-            }
+            HLK_LOG_INFO("FlowType: %d, FlowSize: %f, Current_Month_Flow: %f, Current_Year_Flow: %f, Current_Flow_Year: %d, Current_Month: %d\n", 
+                sharedData.flowtype, sharedData.flowsize, sharedData.current_month_flow, sharedData.current_year_flow, sharedData.current_flow_year, sharedData.current_month);
+    
         }
 
-        HLK_LOG_INFO("FlowType: %d, FlowSize: %f, Current_Month_Flow: %f, Current_Year_Flow: %f, Current_Flow_Year: %d, Current_Month: %d\n", 
-            sharedData.flowtype, sharedData.flowsize, sharedData.current_month_flow, sharedData.current_year_flow, sharedData.current_flow_year, sharedData.current_month);
+        sim_traffic_process(is_next); // 初始化运行期SIM流量统计
 
-        sim_traffic_process(); // 初始化运行期SIM流量统计
+    }
+    if (!time_sync) {
+        //时间同步后 把ntp server关掉 
+        system("/etc/init.d/sysntpd stop");
+        HLK_LOG_INFO("sysntpd stopped after cloud ping reply\n");
+        time_sync = 1;
     }
 
+    #if 0
     //服务器时间同步
     unsigned long long utc_time;
     server_time = cJSON_GetObjectItem(root, "ServerTime");
@@ -1914,6 +1985,8 @@ static void hlk_mqtt_handle_ping_reply(MessageData *data)
         zig_set_timezone_system("CST-8");
         time_sync = 1;
     }
+    #endif
+
     // 设置消息流量限制（函数已注释）
     //hlk_mqtt_set_msg_limit(flag->valueint, item->valueint, max_count->valueint);
 
@@ -1964,55 +2037,39 @@ static void hlk_mqtt_handle_flow_update_confirm(MessageData *data)
             }
 
             cJSON *CurrentMonthFlow = cJSON_GetObjectItem(root, "CurrentMonthFlow");
-            if (CurrentMonthFlow == NULL)
-            {
-                HLK_LOG_ERR("cJSON_GetObjectItem CurrentMonthFlow error\n");
-            } else {
-                sharedData.current_month_flow = CurrentMonthFlow->valuedouble;
-            }
-
             cJSON *CurrentYearFlow = cJSON_GetObjectItem(root, "CurrentYearFlow");
-            if (CurrentYearFlow == NULL)
-            {
-                HLK_LOG_ERR("cJSON_GetObjectItem CurrentYearFlow error\n");
-            } else {
-                sharedData.current_year_flow = CurrentYearFlow->valuedouble;
-            }
-
             cJSON *CurrentFlowYear = cJSON_GetObjectItem(root, "CurrentFlowYear");
-            if (CurrentFlowYear == NULL)
-            {
-                HLK_LOG_ERR("cJSON_GetObjectItem CurrentFlowYear error\n");
-            } else {
-                sharedData.current_flow_year = CurrentFlowYear->valueint;
-            }
-
             cJSON *CurrentMonth = cJSON_GetObjectItem(root, "CurrentFlowMonth");
-            if (CurrentMonth == NULL)
-            {
-                HLK_LOG_ERR("cJSON_GetObjectItem CurrentFlowMonth error\n");
-            } else {
+            if (CurrentMonthFlow != NULL && CurrentYearFlow != NULL && CurrentFlowYear != NULL && CurrentMonth != NULL) {
+                //在ping reply中 会修改时间 这里是否需要再去判断next_month
+                sharedData.current_month_flow = CurrentMonthFlow->valuedouble;
+                sharedData.current_year_flow = CurrentYearFlow->valuedouble;
+                sharedData.current_flow_year = CurrentFlowYear->valueint;
                 sharedData.current_month = CurrentMonth->valueint;
-            }
 
-            // 根据云端确认的套餐流量判断是否通知守护进程禁止内置卡继续联网。
-            if (sharedData.flowtype == 0 && CurrentMonthFlow != NULL) {
-                sim_traffic_clear_state();
+                if (sharedData.isnextmonth)
+                {
+                    sharedData.isnextmonth = 0;
+                    hlk_mqtt_ping(1); //触发心跳 ，更新套餐流量
+                } else {
+                    // 根据云端确认的套餐流量判断是否通知守护进程禁止内置卡继续联网。
+                    if (sharedData.flowtype == 0 && CurrentMonthFlow != NULL) {
+                        sim_traffic_clear_state();
 
-                if (CurrentMonthFlow->valuedouble >= sharedData.flowsize) {
-                    HLK_LOG_INFO("[SIM_TRAFFIC] internal sim flow limit reached by month\n");
-                    sim_traffic_write_block_request();
+                        if (CurrentMonthFlow->valuedouble >= sharedData.flowsize) {
+                            HLK_LOG_INFO("[SIM_TRAFFIC] internal sim flow limit reached by month\n");
+                            sim_traffic_write_block_request();
+                        }
+                    } else if (sharedData.flowtype == 1 && CurrentYearFlow != NULL) {
+                        sim_traffic_clear_state();
+
+                        if (CurrentYearFlow->valuedouble >= sharedData.flowsize) {
+                            HLK_LOG_INFO("[SIM_TRAFFIC] internal sim flow limit reached by year\n");
+                            sim_traffic_write_block_request();
+                        }
+                    }
                 }
-            } else if (sharedData.flowtype == 1 && CurrentYearFlow != NULL) {
-                sim_traffic_clear_state();
-
-                if (CurrentYearFlow->valuedouble >= sharedData.flowsize) {
-                    HLK_LOG_INFO("[SIM_TRAFFIC] internal sim flow limit reached by year\n");
-                    sim_traffic_write_block_request();
-                }
             }
-
-
         } else {
             //设备未收到流量 或失败
             HLK_LOG_ERR("Status: %s error\n", Status->valuestring);
@@ -2974,17 +3031,17 @@ static void md5_encode(void)
     sprintf(mqtt_connect_cret.id, "%s|%s|%s|%s|%s", 
             mqtt_user_cert.productKey, "adsfrm65tasd", MODULE_TYPE,
             mqtt_user_cert.deviceName, NET_TYPE);
-    HLK_LOG_INFO("id:%s\n", mqtt_connect_cret.id);
+    //HLK_LOG_INFO("id:%s\n", mqtt_connect_cret.id);
     
     // 构建MQTT用户名
     // 格式：设备名称|时间戳000|本地IP|MAC地址
     sprintf(mqtt_connect_cret.user_name, "%s|%s000|%s|%s", 
             mqtt_user_cert.deviceName, timestamp, local_ip, mac);
-    HLK_LOG_INFO("user_name = %s\n", mqtt_connect_cret.user_name);
+    //HLK_LOG_INFO("user_name = %s\n", mqtt_connect_cret.user_name);
     
     // 初始化密码前缀
     sprintf(mqtt_connect_cret.password, "$md5$%s$", timestamp);
-    HLK_LOG_INFO("password:%s\n", mqtt_connect_cret.password);
+    //HLK_LOG_INFO("password:%s\n", mqtt_connect_cret.password);
 
     // 第一次MD5加密：对设备密钥进行加密
     MD5_CTX md5;
@@ -3025,7 +3082,6 @@ static void md5_encode(void)
  ******************************************************************************/
 int hlk_MQTTYield(SHARED_DATA_S *sharedData)
 {
-    HLK_LOG_INFO("MQTTYield\r\n");
     int rc;
     
     time_t time_start, time_ping, time_report_start, time_report;
@@ -3056,6 +3112,7 @@ int hlk_MQTTYield(SHARED_DATA_S *sharedData)
             sharedData->current_year_flow = 0;
             sharedData->current_flow_year = 0;
             sharedData->current_month = 0;
+            sharedData->isnextmonth = 0;
             break;  // 跳出循环，返回上层进行重连
         }
         
@@ -3074,7 +3131,7 @@ int hlk_MQTTYield(SHARED_DATA_S *sharedData)
         time_report = zig_get_timestamp();
         if ((int)zig_time_diff_abs(time_report_start, time_report) >= 60) {
             time_report_start = time_report;
-            sim_traffic_process(); // 基于/proc/uptime每分钟采样，15~30分钟随机上报
+            sim_traffic_process(0); // 基于/proc/uptime每分钟采样，15~30分钟随机上报
         }
 
         // 主循环休眠1秒，避免CPU占用过高
@@ -3114,15 +3171,12 @@ int hlk_mqtt_main()
             } 
             
             // 生成MD5加密的连接认证信息
-            HLK_LOG_INFO("md5_encode\r\n");
             md5_encode();
             
             // 初始化所有MQTT主题
-            HLK_LOG_INFO("mqtt_topic_type_init\r\n"); 
             mqtt_topic_type_init();
             
             // 设置消息处理函数
-            HLK_LOG_INFO("hlk_MQTTYield\r\n");
             hlk_iot.func = hlk_MQTTYield;
             break;
             
@@ -3281,7 +3335,7 @@ int sync_system_time(void)
     HLK_LOG_INFO("Attempting to sync system time...\n");
 
     // 方法1: 尝试使用 ntpdate 命令同步时间
-    int ret = system("ntpdate -u pool.ntp.org > /dev/null 2>&1");
+    int ret = system("/etc/init.d/sysntpd restart");
     if (ret == 0) {
         HLK_LOG_INFO("System time synchronized successfully using ntpdate\n");
         return 0;
@@ -3312,6 +3366,54 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
     mem->memory[mem->size] = 0; // 确保字符串以null结尾
     
     return realsize;
+}
+
+static int try_sync_time_from_address_response(cJSON *json)
+{
+    cJSON *code = cJSON_GetObjectItemCaseSensitive(json, "Code");
+    if (!cJSON_IsNumber(code) || code->valueint != 2) {
+        return 0;  /* 不是时间戳错误 */
+    }
+    cJSON *message = cJSON_GetObjectItemCaseSensitive(json, "Message");
+    if (message != NULL && cJSON_IsString(message)) {
+        HLK_LOG_INFO("Message: %s\n", message->valuestring);
+        /* 双重确认，防止 Code=2 以后复用给其他错误 */
+        if (strstr(message->valuestring, "时间戳") == NULL) {
+            return 0;
+        } 
+    }
+    cJSON *op_time = cJSON_GetObjectItemCaseSensitive(json, "OperationTime");
+    if (op_time == NULL || !cJSON_IsString(op_time)) {
+        HLK_LOG_ERR("Code=2 but OperationTime missing\n");
+        return -1;
+    }
+    HLK_LOG_INFO("OperationTime: %s\n", op_time->valuestring);
+
+    sync_system_time();
+
+    #if 0
+    /* 先设时区，mktime 按北京时间解释 OperationTime */
+    zig_set_timezone_system("CST-8");
+    struct tm tm_val;
+    memset(&tm_val, 0, sizeof(tm_val));
+    if (strptime(op_time->valuestring, "%Y-%m-%d %H:%M:%S", &tm_val) == NULL) {
+        HLK_LOG_ERR("Failed to parse OperationTime: %s\n", op_time->valuestring);
+        return -1;
+    }
+    time_t sec = mktime(&tm_val);
+    if (sec == (time_t)-1) {
+        HLK_LOG_ERR("mktime failed for OperationTime\n");
+        return -1;
+    }
+    long long server_ms = (long long)sec * 1000LL;
+    if (zig_set_timesync(server_ms) != 0) {
+        HLK_LOG_ERR("zig_set_timesync failed\n");
+        return -1;
+    }
+    HLK_LOG_INFO("Time synced from server: %s (%lld ms)\n",
+                 op_time->valuestring, server_ms);
+    #endif
+    return 1;  /* 已同步，需要重试请求 */
 }
 
 /******************************************************************************
@@ -3461,7 +3563,7 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
     if (res != CURLE_OK) {
         //HLK_LOG_INFO("curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
         if (strlen(errbuf) > 0) {
-            HLK_LOG_INFO("Detailed error: %s\n", errbuf);
+            //HLK_LOG_INFO("Detailed error: %s\n", errbuf);
         }
         curl_easy_cleanup(curl);
         curl_slist_free_all(headers);
@@ -3484,12 +3586,12 @@ size_t quest_write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
      // 检查响应状态码
      cJSON *code_status = cJSON_GetObjectItemCaseSensitive(json, "Code");
      if (!cJSON_IsNumber(code_status) || (code_status->valueint != 1)) {
-        HLK_LOG_INFO("API request failed. Code: %d\n", code_status->valueint);
-         cJSON_Delete(json);
-         curl_easy_cleanup(curl);
-         curl_slist_free_all(headers);
-         free(response_data.memory);
-         return -1;
+        try_sync_time_from_address_response(json);
+        cJSON_Delete(json);
+        curl_easy_cleanup(curl);
+        curl_slist_free_all(headers);
+        free(response_data.memory);
+        return -1;
      }
  
      // 获取Data字段
@@ -3574,7 +3676,7 @@ void switch_mqtt_url(char **url)
             url_store[1][MQTT_URL_LEN-1] = '\0';
         }
         
-        app_msleep(1000);
+        app_msleep(5000);
     }
     *url = url_store[0];
 }

@@ -112,6 +112,19 @@ export fn zig_get_timestamp() i64 {
     return @intCast(now);
 }
 
+export fn zig_get_month() i64 {
+    const t = time(null);
+    if (t == -1) return -1;
+    const now = localtime(&t) orelse return -1;
+    return @intCast(now.tm_mon + 1);
+}
+export fn zig_get_year() i64 {
+    const t = time(null);
+    if (t == -1) return -1;
+    const now = localtime(&t) orelse return -1;
+    return @intCast(now.tm_year + 1900);
+}
+
 // 设置时区环境变量 - Zig实现，避免C ABI兼容性问题
 export fn zig_set_timezone(tz: [*:0]const u8) c_int {
     // 使用C库的setenv函数设置TZ环境变量
@@ -365,7 +378,7 @@ pub fn main() !void {
                 }
                 i += 1;
             }
-            
+
             if (i != 5) {
                 std.debug.print("Error: --set-license requires exactly 5 arguments (DN PjK PdK PdS DS), got {d}\n\n", .{i});
                 printUsage();

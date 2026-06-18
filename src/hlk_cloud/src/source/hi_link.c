@@ -439,7 +439,6 @@ void set_cloud_status(int cloud_status)
 ******************************************************************************/
 int mqtt_main(struct Options options)
 {
-    HLK_LOG_INFO("mqtt_main\r\n");
     #if 1
 	/* MQTT相关变量定义 */
 	Network n;                    /* 网络连接对象 */
@@ -457,7 +456,7 @@ conn:
 	memset(&n, 0, sizeof(Network));
 	NetworkInit(&n);
 	
-	HLK_LOG_INFO("options.host %s  options.port %d\r\n",options.host, options.port);
+	//HLK_LOG_INFO("options.host %s  options.port %d\r\n",options.host, options.port);
 	//创建标识私有云连接的文件
 	system("touch /tmp/cloud_CLOUD_status");
 	set_cloud_status(MQTT_CONNECT_STATUS_CONNECTING);
@@ -467,7 +466,7 @@ conn:
 	if(rc != SUCCESS){
 		/* 连接失败，断开网络连接并重试 */
 		NetworkDisconnect(&n);
-		HLK_LOG_ERR("NetworkConnect rc : %d\n",rc);
+		//HLK_LOG_ERR("NetworkConnect rc : %d\n",rc);
 		app_msleep(MQTT_RECONNECT_INTERVAL);  /* 等待10秒后重试 */
 		goto conn;
 	}
@@ -590,8 +589,9 @@ static void *hlk_user_main(void *arg)
 	sharedData.flowsize = 0;
 	sharedData.current_month_flow = 0;
 	sharedData.current_year_flow = 0;
-	sharedData.current_flow_year = 0;
-	sharedData.current_month = 0;
+	sharedData.current_flow_year = -1;
+	sharedData.current_month = -1;
+	sharedData.isnextmonth = 0;
 	pthread_mutex_init(&sharedData.mutex, NULL);  /* 初始化互斥锁 */
 
 	#if 0

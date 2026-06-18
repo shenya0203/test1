@@ -157,6 +157,7 @@ typedef struct
     int current_flow_year;     //当前流量快照所属年份
     int current_month;         //当前流量快照所属月份
     int isblocked;             //内置卡是否被阻断 0:未阻断 1:阻断
+    int isnextmonth;           //是否是次月 0:否 1:是
 }SHARED_DATA_S;
 
 /* 海凌科iot云操作对象 */

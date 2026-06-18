@@ -47,6 +47,9 @@ extern void zig_msleep(unsigned int msec);
 // Zig实现的时间戳获取函数，避免C ABI兼容性问题
 extern long long zig_get_timestamp(void);
 
+extern int zig_get_month(void);
+extern int zig_get_year(void);
+
 // Zig实现的时区设置函数，避免C ABI兼容性问题
 extern int zig_set_timezone(const char *tz);
 
