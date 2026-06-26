@@ -859,7 +859,7 @@ static int sim_traffic_init(unsigned long long uptime_sec, const SIM_MODEM_STATU
         sim_traffic_save_state(&g_sim_traffic_state);
 
         return 0;
-    }
+    } 
 
 init_new_state:
     if (sim_traffic_read_interface(&rx_bytes, &tx_bytes) != 0) {
@@ -981,7 +981,7 @@ static int sim_traffic_report(void)
     //S: 是否缩写。`0`=默认不缩写，`1`=允许使用缩写字段名
     cJSON_AddNumberToObject(root, "S", 1);
     //T: 流量所属时间，UTC 毫秒时间戳。补传跨月/跨年流量时建议必传，平台据此确定归档到哪一年哪一月
-    cJSON_AddNumberToObject(root, "T", zig_get_timestamp()*1000);
+    cJSON_AddNumberToObject(root, "T", zig_get_timestamp()); 
     //Flow: 设备所属月份的流量值。设备始终上报“该月份的最终流量值”。单位需与设备表 `CurrentMonthFlow/CurrentYearFlow` 保持一致，建议统一按 KB 存储
     cJSON_AddNumberToObject(root, "F", total_bytes);
 
@@ -1131,7 +1131,7 @@ static void sim_traffic_process(int next)
         g_sim_traffic_state.initialized = 0;
         sim_traffic_init(uptime_sec, &modem_status);
         return;
-    }
+    } 
 
     //如果上次采样时间小于当前时间，则需要采样流量统计数据
     if ( uptime_sec - g_sim_traffic_state.last_sample_uptime >= SIM_TRAFFIC_SAMPLE_INTERVAL_SEC) {   //1分钟采样一次
