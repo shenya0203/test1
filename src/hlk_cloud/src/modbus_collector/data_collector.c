@@ -876,7 +876,7 @@ static int should_report_data(collector_ctx_t *ctx)
         static time_t last_period_report = 0;
         if (now - last_period_report >= config->cond.period) {
             last_period_report = now;
-            HLK_LOG_INFO("[Collector] last_period_report: %lld\n", last_period_report);
+            //HLK_LOG_INFO("[Collector] last_period_report: %lld\n", last_period_report);
             return 1;
         }
     }

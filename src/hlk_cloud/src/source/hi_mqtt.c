@@ -167,6 +167,8 @@ typedef struct {
     unsigned long long session_id;
     unsigned long long last_rx_bytes;
     unsigned long long last_tx_bytes;
+    unsigned long long last_rx_packets;
+    unsigned long long last_tx_packets;
     unsigned long long total_rx_bytes;
     unsigned long long total_tx_bytes;
     unsigned long long last_sample_uptime;
@@ -198,12 +200,13 @@ struct MemoryStruct {
 #define SIM_MODEM_STATUS_PATH "/tmp/modem_status.json"
 #define SIM_TRAFFIC_BLOCK_PATH "/tmp/internal_sim_blocked.json"
 #define SIM_TRAFFIC_BLOCK_TMP_PATH "/tmp/internal_sim_blocked.json.tmp"
+#define SIM_TRAFFIC_L2_HEADER_SIZE 58             // 以太网 MAC 头长度 (dst MAC + src MAC + EtherType)，电信计费不含二层头
 #define SIM_TRAFFIC_SAMPLE_INTERVAL_SEC 60
 #define SIM_TRAFFIC_REPORT_MIN_INTERVAL_SEC (15 * 60)
 #define SIM_TRAFFIC_REPORT_MAX_INTERVAL_SEC (30 * 60)
 #define SIM_TRAFFIC_COUNTER_MAX 0xFFFFFFFFULL
 #define SIM_TRAFFIC_MAX_BYTES_PER_SEC (1ULL * 1024ULL * 1024ULL)    //最大速率 1M/s
-#define SIM_TRAFFIC_STATE_VERSION 3
+#define SIM_TRAFFIC_STATE_VERSION 4
 #define SIM_TRAFFIC_SIM_INTERNAL "internal"
 #define SIM_TRAFFIC_DIAL_CONNECTED "connected"
 #define SIM_TRAFFIC_BLOCK_REASON "flow_limit"
@@ -667,6 +670,26 @@ static int sim_traffic_read_interface(unsigned long long *rx_bytes, unsigned lon
 
     if (sim_traffic_read_counter(tx_path, tx_bytes) != 0) {
         return -1;
+    } 
+
+    return 0;
+}
+
+static int sim_traffic_read_interface_packets(unsigned long long *rx_pkts, unsigned long long *tx_pkts)
+{
+    char rx_path[128] = {0};
+    char tx_path[128] = {0};
+    const char *interface_name = SIM_TRAFFIC_INTERFACE;
+
+    snprintf(rx_path, sizeof(rx_path), "/sys/class/net/%s/statistics/rx_packets", interface_name);
+    snprintf(tx_path, sizeof(tx_path), "/sys/class/net/%s/statistics/tx_packets", interface_name);
+
+    if (sim_traffic_read_counter(rx_path, rx_pkts) != 0) {
+        return -1;
+    }
+
+    if (sim_traffic_read_counter(tx_path, tx_pkts) != 0) {
+        return -1;
     }
 
     return 0;
@@ -751,6 +774,14 @@ static int sim_traffic_load_state(SIM_TRAFFIC_STATE_S *state)
     if (cJSON_IsNumber(item)) {
         state->last_tx_bytes = (unsigned long long)item->valuedouble;
     }
+    item = cJSON_GetObjectItem(root, "LastRxPackets");
+    if (cJSON_IsNumber(item)) {
+        state->last_rx_packets = (unsigned long long)item->valuedouble;
+    }
+    item = cJSON_GetObjectItem(root, "LastTxPackets");
+    if (cJSON_IsNumber(item)) {
+        state->last_tx_packets = (unsigned long long)item->valuedouble;
+    }
     item = cJSON_GetObjectItem(root, "TotalRxBytes");
     if (cJSON_IsNumber(item)) {
         state->total_rx_bytes = (unsigned long long)item->valuedouble;
@@ -794,6 +825,8 @@ static int sim_traffic_save_state(const SIM_TRAFFIC_STATE_S *state)
     cJSON_AddNumberToObject(root, "CounterBits", 32);
     cJSON_AddNumberToObject(root, "LastRxBytes", (double)state->last_rx_bytes);
     cJSON_AddNumberToObject(root, "LastTxBytes", (double)state->last_tx_bytes);
+    cJSON_AddNumberToObject(root, "LastRxPackets", (double)state->last_rx_packets);
+    cJSON_AddNumberToObject(root, "LastTxPackets", (double)state->last_tx_packets);
     cJSON_AddNumberToObject(root, "TotalRxBytes", (double)state->total_rx_bytes);
     cJSON_AddNumberToObject(root, "TotalTxBytes", (double)state->total_tx_bytes);
     cJSON_AddNumberToObject(root, "LastSampleUptime", (double)state->last_sample_uptime);
@@ -871,6 +904,12 @@ init_new_state:
     g_sim_traffic_state.session_id = modem_status->session_id;
     g_sim_traffic_state.last_rx_bytes = rx_bytes;
     g_sim_traffic_state.last_tx_bytes = tx_bytes;
+    if (sim_traffic_read_interface_packets(&g_sim_traffic_state.last_rx_packets,
+                                           &g_sim_traffic_state.last_tx_packets) != 0)
+    {
+        g_sim_traffic_state.last_rx_packets = 0;
+        g_sim_traffic_state.last_tx_packets = 0;
+    }
     g_sim_traffic_state.last_sample_uptime = uptime_sec;
     g_sim_traffic_state.next_report_uptime = uptime_sec + sim_traffic_next_report_interval();
     sim_traffic_save_state(&g_sim_traffic_state);
@@ -884,8 +923,12 @@ static int sim_traffic_sample(unsigned long long uptime_sec, const SIM_MODEM_STA
 {
     unsigned long long rx_bytes = 0;
     unsigned long long tx_bytes = 0;
+    unsigned long long rx_packets = 0;
+    unsigned long long tx_packets = 0;
     unsigned long long rx_delta;
     unsigned long long tx_delta;
+    unsigned long long rx_pkt_delta;
+    unsigned long long tx_pkt_delta;
     unsigned long long elapsed_sec;
 
     if (modem_status == NULL) {
@@ -893,6 +936,10 @@ static int sim_traffic_sample(unsigned long long uptime_sec, const SIM_MODEM_STA
     }
 
     if (sim_traffic_read_interface(&rx_bytes, &tx_bytes) != 0) {
+        return -1;
+    }
+
+    if (sim_traffic_read_interface_packets(&rx_packets, &tx_packets) != 0) {
         return -1;
     }
 
@@ -907,18 +954,26 @@ static int sim_traffic_sample(unsigned long long uptime_sec, const SIM_MODEM_STA
         elapsed_sec = SIM_TRAFFIC_SAMPLE_INTERVAL_SEC;
     }
 
-    rx_delta = sim_traffic_calc_delta(rx_bytes, g_sim_traffic_state.last_rx_bytes, elapsed_sec) - 28;
-    tx_delta = sim_traffic_calc_delta(tx_bytes, g_sim_traffic_state.last_tx_bytes, elapsed_sec) - 28;
+    rx_delta = sim_traffic_calc_delta(rx_bytes, g_sim_traffic_state.last_rx_bytes, elapsed_sec);
+    tx_delta = sim_traffic_calc_delta(tx_bytes, g_sim_traffic_state.last_tx_bytes, elapsed_sec);
+    rx_pkt_delta = sim_traffic_calc_delta(rx_packets, g_sim_traffic_state.last_rx_packets, elapsed_sec);
+    tx_pkt_delta = sim_traffic_calc_delta(tx_packets, g_sim_traffic_state.last_tx_packets, elapsed_sec);
+
+    rx_delta -= rx_pkt_delta * SIM_TRAFFIC_L2_HEADER_SIZE - 28;
+    tx_delta -= tx_pkt_delta * SIM_TRAFFIC_L2_HEADER_SIZE - 28;
 
     g_sim_traffic_state.total_rx_bytes += rx_delta;
     g_sim_traffic_state.total_tx_bytes += tx_delta;
     g_sim_traffic_state.last_rx_bytes = rx_bytes;
     g_sim_traffic_state.last_tx_bytes = tx_bytes;
+    g_sim_traffic_state.last_rx_packets = rx_packets;
+    g_sim_traffic_state.last_tx_packets = tx_packets;
     g_sim_traffic_state.last_sample_uptime = uptime_sec;
     sim_traffic_save_state(&g_sim_traffic_state);
 
-    HLK_LOG_INFO("[SIM_TRAFFIC] sample session=%llu rx_delta=%llu tx_delta=%llu total=%llu\n",
+    HLK_LOG_INFO("[SIM_TRAFFIC] sample session=%llu rx_delta=%llu tx_delta=%llu rx_pkt=%llu tx_pkt=%llu total=%llu\n",
                  g_sim_traffic_state.session_id, rx_delta, tx_delta,
+                 rx_pkt_delta, tx_pkt_delta,
                  g_sim_traffic_state.total_rx_bytes + g_sim_traffic_state.total_tx_bytes);
     return 0;
 }
@@ -1965,7 +2020,7 @@ static void hlk_mqtt_handle_ping_reply(MessageData *data)
         //时间同步后 把ntp server关掉 
         system("/etc/init.d/sysntpd stop");
         HLK_LOG_INFO("sysntpd stopped after cloud ping reply\n");
-        time_sync = 1;
+        zig_set_timezone_system("CST-8");
     }
 
     #if 0

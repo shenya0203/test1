@@ -155,6 +155,19 @@ export fn zig_time_diff_abs(time1: i64, time2: i64) i64 {
     }
 }
 
+export fn zig_get_day() i64 {
+    const t = time(null);
+    if (t == -1) return -1;
+    const now = localtime(&t) orelse return -1;
+    return @intCast(now.tm_mday);
+}
+export fn zig_get_hour() i64 {
+    const t = time(null);
+    if (t == -1) return -1;
+    const now = localtime(&t) orelse return -1;
+    return @intCast(now.tm_hour);
+}
+
 // 设置系统时间同步 - Zig实现，使用system()调用避免settimeofday阻塞
 export fn zig_set_timesync(timestamp: i64) c_int {
     // 将毫秒时间戳转换为秒
