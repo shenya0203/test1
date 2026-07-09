@@ -200,8 +200,8 @@ struct MemoryStruct {
 #define SIM_MODEM_STATUS_PATH "/tmp/modem_status.json"
 #define SIM_TRAFFIC_BLOCK_PATH "/tmp/internal_sim_blocked.json"
 #define SIM_TRAFFIC_BLOCK_TMP_PATH "/tmp/internal_sim_blocked.json.tmp"
-#define SIM_TRAFFIC_L2_HEADER_SIZE 58             // 以太网 MAC 头长度 (dst MAC + src MAC + EtherType)，电信计费不含二层头
-#define SIM_TRAFFIC_SAMPLE_INTERVAL_SEC 60
+#define SIM_TRAFFIC_L2_HEADER_SIZE 35             // 以太网 MAC 头长度 (dst MAC + src MAC + EtherType)，电信计费不含二层头
+#define SIM_TRAFFIC_SAMPLE_INTERVAL_SEC 30
 #define SIM_TRAFFIC_REPORT_MIN_INTERVAL_SEC (15 * 60)
 #define SIM_TRAFFIC_REPORT_MAX_INTERVAL_SEC (30 * 60)
 #define SIM_TRAFFIC_COUNTER_MAX 0xFFFFFFFFULL
@@ -623,8 +623,7 @@ static int sim_traffic_is_internal_connected(const SIM_MODEM_STATUS_S *status)
 {
     return status != NULL &&
            status->valid &&
-           strcmp(status->sim_source, SIM_TRAFFIC_SIM_INTERNAL) == 0 &&
-           strcmp(status->dial_status, SIM_TRAFFIC_DIAL_CONNECTED) == 0;
+           strcmp(status->sim_source, SIM_TRAFFIC_SIM_INTERNAL) == 0;
 }
 
 static int sim_traffic_read_counter(const char *path, unsigned long long *value)
@@ -971,10 +970,13 @@ static int sim_traffic_sample(unsigned long long uptime_sec, const SIM_MODEM_STA
     g_sim_traffic_state.last_sample_uptime = uptime_sec;
     sim_traffic_save_state(&g_sim_traffic_state);
 
+    #if 0
     HLK_LOG_INFO("[SIM_TRAFFIC] sample session=%llu rx_delta=%llu tx_delta=%llu rx_pkt=%llu tx_pkt=%llu total=%llu\n",
                  g_sim_traffic_state.session_id, rx_delta, tx_delta,
                  rx_pkt_delta, tx_pkt_delta,
                  g_sim_traffic_state.total_rx_bytes + g_sim_traffic_state.total_tx_bytes);
+    #endif
+
     return 0;
 }
 
@@ -1139,11 +1141,12 @@ exit:
     return ret;
 }
 
-static void sim_traffic_process(int next)
+static void sim_traffic_process(int next, int is_ota)
 {
     unsigned long long uptime_sec = 0;
     SIM_MODEM_STATUS_S modem_status = {0};
     static unsigned long long last_status_log_uptime = 0;
+    int is_out_of_range = 0;
 
     if (sharedData.flowtype == -1) {
         return;
@@ -1189,13 +1192,17 @@ static void sim_traffic_process(int next)
     } 
 
     //如果上次采样时间小于当前时间，则需要采样流量统计数据
-    if ( uptime_sec - g_sim_traffic_state.last_sample_uptime >= SIM_TRAFFIC_SAMPLE_INTERVAL_SEC) {   //1分钟采样一次
+    if ( uptime_sec - g_sim_traffic_state.last_sample_uptime >= SIM_TRAFFIC_SAMPLE_INTERVAL_SEC || is_ota) {   //1分钟采样一次
         if (sim_traffic_sample(uptime_sec, &modem_status) < 0) {
             return;
         }
+        if (sharedData.current_month_flow + (g_sim_traffic_state.total_rx_bytes + g_sim_traffic_state.total_tx_bytes)/1024 >= sharedData.flowsize)
+        {
+            is_out_of_range = 1;
+        }
     }
 
-    if (uptime_sec >= g_sim_traffic_state.next_report_uptime || next) {
+    if (uptime_sec >= g_sim_traffic_state.next_report_uptime || next || is_ota || is_out_of_range) {
         //上报流量统计数据
         if (sharedData.connect_status == MQTT_CONNECT_STATUS_CONNECTED) {
             sim_traffic_report();
@@ -2013,7 +2020,7 @@ static void hlk_mqtt_handle_ping_reply(MessageData *data)
     
         }
 
-        sim_traffic_process(is_next); // 初始化运行期SIM流量统计
+        sim_traffic_process(is_next, 0); // 初始化运行期SIM流量统计
 
     }
     if (!time_sync) {
@@ -2205,7 +2212,7 @@ size_t write_callback(void *ptr, size_t size, size_t nmemb, FILE *stream) {
 
     // 检查输入参数的有效性
     if (!ptr || !stream || size == 0 || nmemb == 0) {
-        HLK_LOG_ERR("write_callback: 无效的输入参数\n");
+        //HLK_LOG_ERR("write_callback: 无效的输入参数\n");
         return 0;  // 返回0告知libcurl出现错误
     }
 
@@ -2900,6 +2907,114 @@ int hlk_ota_http(char *server_name, char *path)
 }
 
 /******************************************************************************
+ * 函数名    : sim_traffic_is_default_route_via_lte
+ * 功能描述  : 检查系统默认路由是否经过 LTE 接口
+ * 输入参数  : 无
+ * 输出参数  : 无
+ * 返回值    : 1 - 默认路由走 LTE 接口 (eth1)
+ *             0 - 默认路由不走 LTE 接口，或读取失败
+ * 说明      : 读取 /proc/net/route，查找 Destination=00000000 且
+ *            Iface 匹配 SIM_TRAFFIC_INTERFACE 的条目
+ ******************************************************************************/
+static int sim_traffic_is_default_route_via_lte(void)
+{
+    FILE *fp = NULL;
+    char line[256] = {0};
+    const char *interface_name = SIM_TRAFFIC_INTERFACE;
+
+    fp = fopen("/proc/net/route", "r");
+    if (fp == NULL) {
+        HLK_LOG_WARN("[SIM_TRAFFIC] open /proc/net/route failed: %s\n", strerror(errno));
+        return 0;
+    }
+
+    // 跳过表头行
+    if (fgets(line, sizeof(line), fp) == NULL) {
+        fclose(fp);
+        return 0;
+    }
+
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        char iface[32] = {0};
+        char dest[16] = {0};
+
+        // 格式: Iface Destination Gateway Flags Metric Ref Use Mask
+        if (sscanf(line, "%31s %15s", iface, dest) >= 2) {
+            // Destination == "00000000" 表示默认路由
+            if (strcmp(dest, "00000000") == 0 &&
+                strcmp(iface, interface_name) == 0) {
+                fclose(fp);
+                return 1;
+            }
+        }
+    }
+
+    fclose(fp);
+    return 0;
+}
+
+/******************************************************************************
+ * 函数名    : sim_traffic_check_ota
+ * 功能描述  : OTA升级前检查LTE+内置卡场景下剩余流量是否足够
+ * 输入参数  : ota_file_size_bytes - OTA固件文件大小（字节）
+ * 输出参数  : 无
+ * 返回值    : 0 - 流量充足或无需检查，允许OTA
+ *             1 - 流量不足，应阻止OTA
+ * 说明      : 仅在LTE拨号+内置SIM卡场景下检查流量；非此场景或读取失败时放行
+ ******************************************************************************/
+static int sim_traffic_check_ota(unsigned long long ota_file_size_bytes)
+{
+    SIM_MODEM_STATUS_S modem_status = {0};
+    double remaining_kb = 0;
+    double used_bytes = 0;
+    double remaining_bytes = 0;
+
+    // 读取模组状态，失败则保守放行
+    if (sim_traffic_read_modem_status(&modem_status) != 0) {
+        HLK_LOG_WARN("[SIM_TRAFFIC] modem status not ready, skip OTA traffic check\n");
+        return 0;
+    }
+
+    // 仅当 LTE 拨号 + 内置卡时才检查
+    if (!sim_traffic_is_internal_connected(&modem_status)) {
+        HLK_LOG_INFO("[SIM_TRAFFIC] not internal sim, skip OTA traffic check\n");
+        return 0;
+    }
+
+    // 检查默认路由是否走 LTE 接口，否则跳过（走 WAN/WWAN 时不扣内置卡流量）
+    if (!sim_traffic_is_default_route_via_lte()) {
+        HLK_LOG_INFO("[SIM_TRAFFIC] default route not via %s, skip OTA traffic check\n",
+                     SIM_TRAFFIC_INTERFACE);
+        return 0;
+    }
+
+    // 计算已用流量（字节）
+    if (sharedData.flowtype == 0) {
+        remaining_kb = sharedData.flowsize - sharedData.current_month_flow;
+    } else if (sharedData.flowtype == 1) {
+        remaining_kb = sharedData.flowsize - sharedData.current_year_flow;
+    } else {
+        HLK_LOG_WARN("[SIM_TRAFFIC] unknown flowtype=%d, skip OTA traffic check\n", sharedData.flowtype);
+        return 0;
+    }
+
+    // 剩余流量（字节）= 剩余套餐(KB) * 1024 - 当前会话已用流量(字节)
+    used_bytes = (double)(g_sim_traffic_state.total_rx_bytes + g_sim_traffic_state.total_tx_bytes);
+    remaining_bytes = remaining_kb * 1024.0 - used_bytes;
+
+    HLK_LOG_INFO("[SIM_TRAFFIC] OTA check: file=%llu bytes, remaining=%.0f bytes, flowtype=%d\n",
+                 ota_file_size_bytes, remaining_bytes, sharedData.flowtype);
+
+    if (remaining_bytes < (double)ota_file_size_bytes) {
+        HLK_LOG_ERR("[SIM_TRAFFIC] insufficient traffic for OTA: need %llu bytes, remain %.0f bytes\n",
+                    ota_file_size_bytes, remaining_bytes);
+        return 1;
+    }
+
+    return 0;
+}
+
+/******************************************************************************
  * 函数名    : hlk_mqtt_handle_ota
  * 功能描述  : 处理来自云端的OTA升级指令
  * 输入参数  : data - 接收到的OTA升级消息数据
@@ -2978,6 +3093,14 @@ static void hlk_mqtt_handle_ota(MessageData *data)
         HLK_LOG_ERR("cJSON_GetObjectItem FileSize error\n");
         goto exit;
     }
+
+    // 流量检查：LTE+内置卡场景下确认剩余流量是否足够
+    if (sim_traffic_check_ota(size->valueint) == 1) {
+        HLK_LOG_ERR("[OTA] reject due to insufficient traffic, file_size=%u\n", g_ota_size);
+        hlk_mqtt_report_version(HLK_OTA_FLASH_CHECK_ERR, 0, g_ota_msgid);
+        goto exit;
+    }
+
     g_ota_size = size->valueint;  // 保存文件大小到全局变量
 
     // 将版本信息写入本地文件，状态设为2（开始升级）
@@ -2995,15 +3118,17 @@ static void hlk_mqtt_handle_ota(MessageData *data)
     
     if (res == CURLE_OK) {
         HLK_LOG_INFO("Version upgrade running\n");
+        //固件下载完成后需要判断  当前使用的
+        sim_traffic_process(0, 1);  //升级完成后上报流量
         
         // 下载成功，更新升级状态为1（准备安装）
         hlk_ota_write_version(SYSUPGRADE_MSGID_PATH, &get_, 1);
-        
+        app_msleep(2000);
+
         // 执行固件烧录
         fota_Upgrade_Writing();
         
         // 等待5秒确保操作完成
-        app_msleep(5000);
         
         // 重启设备以完成升级
         //app_reboot();
@@ -3147,7 +3272,6 @@ int hlk_MQTTYield(SHARED_DATA_S *sharedData)
     mqtt_subscribe_parse();   // 订阅所有需要的MQTT主题
     hlk_mqtt_ping(IS_START);         // 发送第一个心跳包
     hlk_ota_check_version(); // 检查是否有待处理的OTA升级
-    //sim_traffic_process(); // 初始化运行期SIM流量统计  在收到ping 响应后调用才是正确的
     
     // MQTT消息处理主循环
     while (1)
@@ -3186,7 +3310,7 @@ int hlk_MQTTYield(SHARED_DATA_S *sharedData)
         time_report = zig_get_timestamp();
         if ((int)zig_time_diff_abs(time_report_start, time_report) >= 60) {
             time_report_start = time_report;
-            sim_traffic_process(0); // 基于/proc/uptime每分钟采样，15~30分钟随机上报
+            sim_traffic_process(0, 0); // 基于/proc/uptime每分钟采样，15~30分钟随机上报
         }
 
         // 主循环休眠1秒，避免CPU占用过高
