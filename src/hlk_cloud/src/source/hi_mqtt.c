@@ -200,7 +200,7 @@ struct MemoryStruct {
 #define SIM_MODEM_STATUS_PATH "/tmp/modem_status.json"
 #define SIM_TRAFFIC_BLOCK_PATH "/tmp/internal_sim_blocked.json"
 #define SIM_TRAFFIC_BLOCK_TMP_PATH "/tmp/internal_sim_blocked.json.tmp"
-#define SIM_TRAFFIC_L2_HEADER_SIZE 35             // 以太网 MAC 头长度 (dst MAC + src MAC + EtherType)，电信计费不含二层头
+#define SIM_TRAFFIC_L2_HEADER_SIZE 68             // 以太网 MAC 头长度 (dst MAC + src MAC + EtherType)，电信计费不含二层头
 #define SIM_TRAFFIC_SAMPLE_INTERVAL_SEC 30
 #define SIM_TRAFFIC_REPORT_MIN_INTERVAL_SEC (15 * 60)
 #define SIM_TRAFFIC_REPORT_MAX_INTERVAL_SEC (30 * 60)
@@ -509,6 +509,12 @@ int hlk_mqtt_publish(char *topic, int qos, void *data, int len)
 }
 
 static int sim_traffic_get_uptime(unsigned long long *uptime_sec);
+static int sim_traffic_next_report_interval(void);
+static int sim_traffic_report(void);
+static void sim_traffic_clear_block(void);
+static int sim_traffic_write_block_request(void);
+static void sim_traffic_clear_state(void);
+int sim_traffic_next_month_proc(void);
 
 static void sim_traffic_random_seed_once(void)
 {
@@ -1141,7 +1147,7 @@ exit:
     return ret;
 }
 
-static void sim_traffic_process(int next, int is_ota)
+static void sim_traffic_process(int next, int is_ota, int is_sync)
 {
     unsigned long long uptime_sec = 0;
     SIM_MODEM_STATUS_S modem_status = {0};
@@ -1172,10 +1178,12 @@ static void sim_traffic_process(int next, int is_ota)
         return;
     }
 
+    #if 0
     if (sharedData.isblocked) {
         //如果超限 会主动ping带IMEI
         return;
     }
+    #endif
 
     if (sim_traffic_init(uptime_sec, &modem_status) != 0) {
         HLK_LOG_ERR("[SIM_TRAFFIC] sim traffic init failed\n");
@@ -1192,17 +1200,18 @@ static void sim_traffic_process(int next, int is_ota)
     } 
 
     //如果上次采样时间小于当前时间，则需要采样流量统计数据
-    if ( uptime_sec - g_sim_traffic_state.last_sample_uptime >= SIM_TRAFFIC_SAMPLE_INTERVAL_SEC || is_ota) {   //1分钟采样一次
+    if ( uptime_sec - g_sim_traffic_state.last_sample_uptime >= SIM_TRAFFIC_SAMPLE_INTERVAL_SEC || is_ota || is_sync) {   //1分钟采样一次
         if (sim_traffic_sample(uptime_sec, &modem_status) < 0) {
             return;
         }
+        
         if (sharedData.current_month_flow + (g_sim_traffic_state.total_rx_bytes + g_sim_traffic_state.total_tx_bytes)/1024 >= sharedData.flowsize)
         {
             is_out_of_range = 1;
         }
     }
 
-    if (uptime_sec >= g_sim_traffic_state.next_report_uptime || next || is_ota || is_out_of_range) {
+    if (uptime_sec >= g_sim_traffic_state.next_report_uptime || next || is_ota || is_out_of_range || is_sync) {
         //上报流量统计数据
         if (sharedData.connect_status == MQTT_CONNECT_STATUS_CONNECTED) {
             sim_traffic_report();
@@ -1624,6 +1633,79 @@ int hlk_checkota_response(int status, char *id)
 }
 
 /******************************************************************************
+ * 函数名    : syncflow_normalize_to_kb
+ * 功能描述  : 将流量数值按其单位归一化为 KB
+ * 输入参数  : raw  - 原始数值
+ *            unit - 单位字符串("KB"/"MB"/"GB"/"B")
+ * 输出参数  : 无
+ * 返回值    : 归一化到 KB 后的数值；未知单位当 KB 处理
+ * 说明      : 用于 SyncFlow 保持与 sharedData.flowsize 的 KB 口径一致
+ ******************************************************************************/
+static long long syncflow_normalize_to_kb(long long raw, const char *unit)
+{
+    if (unit == NULL) {
+        return raw;
+    }
+    if (strcmp(unit, "KB") == 0) {
+        return raw;
+    }
+    if (strcmp(unit, "MB") == 0) {
+        return raw * 1024LL;
+    }
+    if (strcmp(unit, "GB") == 0) {
+        return raw * 1024LL * 1024LL;
+    }
+    if (strcmp(unit, "B") == 0) {
+        return raw / 1024LL;
+    }
+    return raw;
+}
+
+/******************************************************************************
+ * 函数名    : hlk_syncflow_response
+ * 功能描述  : 向云端回复 SyncFlow 处理结果
+ * 输入参数  : status - 处理状态(0=成功 其他=失败)
+ *            id     - 对应请求的 Id 字符串
+ * 输出参数  : 无
+ * 返回值    : 0-成功 -1-失败
+ * 说明      : 通过 TOPIC_GET_REPLY 主题回复，便于云端确认设备已同步
+ ******************************************************************************/
+static int hlk_syncflow_response(int status, const char *id)
+{
+    cJSON *root = NULL;
+    char *json_str = NULL;
+
+    if (id == NULL) {
+        HLK_LOG_ERR("[SyncFlow] response aborted: id is NULL\n");
+        return -1;
+    }
+
+    root = cJSON_CreateObject();
+    if (root == NULL) {
+        HLK_LOG_ERR("[SyncFlow] cJSON_CreateObject error\n");
+        return -1;
+    }
+
+    cJSON_AddStringToObject(root, "ID", id);
+    cJSON_AddNumberToObject(root, "Status", status);
+    cJSON_AddStringToObject(root, "Data", status == 0 ? "OK" : "Fail");
+
+    json_str = cJSON_PrintUnformatted(root);
+    if (json_str == NULL) {
+        HLK_LOG_ERR("[SyncFlow] cJSON_PrintUnformatted error\n");
+        cJSON_Delete(root);
+        return -1;
+    }
+
+    hlk_mqtt_publish(mqtt_topic_type_table[TOPIC_GET_REPLY].topic, QOS0,
+                     json_str, strlen(json_str));
+
+    free(json_str);
+    cJSON_Delete(root);
+    return 0;
+}
+
+/******************************************************************************
  * 函数名    : hlk_mqtt_handle_set
  * 功能描述  : 处理来自云端的设备设置消息
  * 输入参数  : pdata - 消息数据结构指针
@@ -1662,34 +1744,109 @@ static void hlk_mqtt_handle_set(MessageData *pdata)
         return;
     }
 
-    if (Name != NULL && (strcmp(Name->valuestring, "CheckOTA") == 0) && Id != NULL) {
-        HLK_LOG_INFO("################## Cloud Check OTA Status ######################\n");
+    if (Name != NULL && Id != NULL) {
+        if ( strcmp(Name->valuestring, "CheckOTA") == 0) {
+            HLK_LOG_INFO("################## Cloud Check OTA Status ######################\n");
 
-        //判断是否正在OTA升级？ 怎么判断
-        VersionInfo versionInfo;
-        char version_now[64];
+            //判断是否正在OTA升级？ 怎么判断
+            VersionInfo versionInfo;
+            char version_now[64];
 
-        if (hlk_ota_read_version(SYSUPGRADE_MSGID_PATH, &versionInfo) < 0) {
-            //不在升级状态
-            hlk_checkota_response(CHECKOTA_STATUS_NO_UPGRADE_OR_UPGRADED, Id->valuestring);
-        } else {
-            HLK_LOG_INFO("versionInfo.progress: %d\n", versionInfo.progress);
-            if (versionInfo.msgid) {
-                get_version_info(version_now); // 获取当前运行的版本号
-                // 比较当前版本与升级目标版本
-                if (strcmp(version_now, versionInfo.version) == 0 && versionInfo.progress == 1){
-                    // 版本匹配且升级流程标志为1，表示升级成功
-                    hlk_checkota_response(CHECKOTA_STATUS_NO_UPGRADE_OR_UPGRADED, Id->valuestring);
+            if (hlk_ota_read_version(SYSUPGRADE_MSGID_PATH, &versionInfo) < 0) {
+                //不在升级状态
+                hlk_checkota_response(CHECKOTA_STATUS_NO_UPGRADE_OR_UPGRADED, Id->valuestring);
+            } else {
+                HLK_LOG_INFO("versionInfo.progress: %d\n", versionInfo.progress);
+                if (versionInfo.msgid) {
+                    get_version_info(version_now); // 获取当前运行的版本号
+                    // 比较当前版本与升级目标版本
+                    if (strcmp(version_now, versionInfo.version) == 0 && versionInfo.progress == 1){
+                        // 版本匹配且升级流程标志为1，表示升级成功
+                        hlk_checkota_response(CHECKOTA_STATUS_NO_UPGRADE_OR_UPGRADED, Id->valuestring);
+                    } else {
+                        // 版本不匹配或升级流程异常，表示升级失败
+                        hlk_checkota_response(CHECKOTA_STATUS_UPGRADE_FAILED, Id->valuestring);
+                    }
                 } else {
-                    // 版本不匹配或升级流程异常，表示升级失败
                     hlk_checkota_response(CHECKOTA_STATUS_UPGRADE_FAILED, Id->valuestring);
                 }
-            } else {
-                hlk_checkota_response(CHECKOTA_STATUS_UPGRADE_FAILED, Id->valuestring);
             }
+        } else if ( strcmp(Name->valuestring, "SyncFlow") == 0) {
+            HLK_LOG_INFO("################## Cloud SyncFlow ######################\n");
+
+            cJSON *inputData = cJSON_GetObjectItem(root, "InputData");
+            if (!cJSON_IsString(inputData) || inputData->valuestring == NULL) {
+                HLK_LOG_ERR("[SyncFlow] InputData not string\n");
+                hlk_syncflow_response(4, Id->valuestring);
+                goto set_exit;
+            }
+
+            // InputData 是嵌套 JSON 字符串，需二次解析
+            cJSON *in = cJSON_Parse(inputData->valuestring);
+            if (in == NULL) {
+                HLK_LOG_ERR("[SyncFlow] parse InputData fail\n");
+                hlk_syncflow_response(4, Id->valuestring);
+                goto set_exit;
+            }
+
+            cJSON *flowTypeItem   = cJSON_GetObjectItem(in,    "FlowType");     //这是个字符串
+            cJSON *totalSizeItem  = cJSON_GetObjectItem(in,    "TotalFlowSize");
+            cJSON *flowUnitItem   = cJSON_GetObjectItem(in,    "FlowUnit");
+            cJSON *esimFlowItem   = cJSON_GetObjectItem(in,    "ESimFlow");
+
+            if (!cJSON_IsString(flowTypeItem) ||
+                !cJSON_IsNumber(totalSizeItem) ||
+                !cJSON_IsString(flowUnitItem)) {
+                HLK_LOG_ERR("[SyncFlow] missing required fields\n");
+                cJSON_Delete(in);
+                hlk_syncflow_response(4, Id->valuestring);
+                goto set_exit;
+            }
+
+            const char *unit    = flowUnitItem->valuestring;
+            long long   total_kb = syncflow_normalize_to_kb((long long)totalSizeItem->valuedouble, unit);
+
+            // 更新套餐总流量与清理类型；注意 flowsize 以 KB 存储（与 sim_traffic_report 口径一致）
+            if (flowTypeItem->valuestring) {
+                sharedData.flowtype = atoi(flowTypeItem->valuestring);
+            }
+            sharedData.flowsize = (double)total_kb;
+
+            HLK_LOG_INFO("[SyncFlow] FlowType=%d TotalFlowSize=%lld KB ESimFlow=%lld\n",
+                         sharedData.flowtype, total_kb,
+                         cJSON_IsNumber(esimFlowItem) ? (long long)esimFlowItem->valuedouble : -1LL);
+
+            // ESimFlow 处理：仅当云端下发的官方查询值 >=0 且大于设备本地统计值时，覆盖本地快照
+            if (cJSON_IsNumber(esimFlowItem)) {
+                long long esim_kb = (long long)esimFlowItem->valuedouble;
+                if (esim_kb >= 0) {
+                    esim_kb = syncflow_normalize_to_kb(esim_kb, unit);
+                    double local_used = (sharedData.flowtype == 1)
+                                        ? sharedData.current_year_flow
+                                        : sharedData.current_month_flow;
+                    local_used = sharedData.current_month_flow;
+                    if ((double)esim_kb > local_used) {
+                        if (sharedData.flowtype == 0) {
+                            sharedData.current_month_flow = (double)esim_kb;
+                        } else {
+                            sharedData.current_year_flow  = (double)esim_kb;
+                        }
+                        sim_traffic_process(0, 0, 1);
+                        HLK_LOG_INFO("[SyncFlow] ESimFlow=%lld KB > local=%.0f KB, snapshot overwritten\n",
+                                        esim_kb, local_used);
+                    } else {
+                        HLK_LOG_INFO("[SyncFlow] ESimFlow=%lld KB <= local=%.0f KB, ignore\n",
+                                        esim_kb, local_used);
+                    }
+                }
+            }
+
+            cJSON_Delete(in);
+            hlk_syncflow_response(0, Id->valuestring);
         }
     }
 
+set_exit:
     cJSON_Delete(root);
 }
 
@@ -2020,7 +2177,7 @@ static void hlk_mqtt_handle_ping_reply(MessageData *data)
     
         }
 
-        sim_traffic_process(is_next, 0); // 初始化运行期SIM流量统计
+        sim_traffic_process(is_next, 0, 0); // 初始化运行期SIM流量统计
 
     }
     if (!time_sync) {
@@ -2028,6 +2185,7 @@ static void hlk_mqtt_handle_ping_reply(MessageData *data)
         system("/etc/init.d/sysntpd stop");
         HLK_LOG_INFO("sysntpd stopped after cloud ping reply\n");
         zig_set_timezone_system("CST-8");
+        time_sync = 1;
     }
 
     #if 0
@@ -2241,7 +2399,7 @@ size_t write_callback(void *ptr, size_t size, size_t nmemb, FILE *stream) {
         // 强制刷新缓冲区，确保已写入的数据保存到磁盘
         if (fflush(stream) != 0) {
             HLK_LOG_ERR("write_callback: 刷新文件缓冲区失败\n");
-        }
+        } 
         
         // 返回0告知libcurl出现错误，这会中断下载
         return 0;
@@ -3119,7 +3277,7 @@ static void hlk_mqtt_handle_ota(MessageData *data)
     if (res == CURLE_OK) {
         HLK_LOG_INFO("Version upgrade running\n");
         //固件下载完成后需要判断  当前使用的
-        sim_traffic_process(0, 1);  //升级完成后上报流量
+        sim_traffic_process(0, 1, 0);  //升级完成后上报流量
         
         // 下载成功，更新升级状态为1（准备安装）
         hlk_ota_write_version(SYSUPGRADE_MSGID_PATH, &get_, 1);
@@ -3310,7 +3468,7 @@ int hlk_MQTTYield(SHARED_DATA_S *sharedData)
         time_report = zig_get_timestamp();
         if ((int)zig_time_diff_abs(time_report_start, time_report) >= 60) {
             time_report_start = time_report;
-            sim_traffic_process(0, 0); // 基于/proc/uptime每分钟采样，15~30分钟随机上报
+            sim_traffic_process(0, 0, 0); // 基于/proc/uptime每分钟采样，15~30分钟随机上报
         }
 
         // 主循环休眠1秒，避免CPU占用过高
