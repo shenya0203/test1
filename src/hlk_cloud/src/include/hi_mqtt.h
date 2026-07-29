@@ -273,7 +273,7 @@ extern int hlk_ota_read_version(const char *filename, VersionInfo *out);
 
 // extern void get_mqtt_user_certification_o();//uci获取other mqtt的认证信息
 extern int get_mqtt_user_certification_h();//获取hlk mqtt的认证信息
-
+extern void replace_https_with_http(char *url);
 extern MQTT_USER_CERT_S mqtt_user_cert;
 extern MQTT_CONNECT_CRET_S mqtt_connect_cret;
 extern HLK_IOT_S hlk_iot;

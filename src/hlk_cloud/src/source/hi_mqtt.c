@@ -123,6 +123,7 @@ int __lstat_time64(const char *path, struct stat *st) {
 #include "hi_link_ipc.h"         // IPC相关定义
 #include "app_api.h"             // Zig实现的函数声明
 #include "app_api.h"             // 应用程序API
+#include "alarm_rule.h"          // 告警规则下发保存
 #include <stdint.h>
 #ifdef HLK_PRODUCT_WR10
 #include "igdCmApi.h"            // 网关管理API
@@ -1843,6 +1844,17 @@ static void hlk_mqtt_handle_set(MessageData *pdata)
 
             cJSON_Delete(in);
             hlk_syncflow_response(0, Id->valuestring);
+        }
+        else if (strcmp(Name->valuestring, SYNC_ALARM_RULE_NAME) == 0) {
+            HLK_LOG_INFO("################## Cloud SyncAlarmRule ######################\n");
+            /* 解析 RuleUrl/ReportUrl -> 立即回复 MQTT -> HTTP GET 下载规则正文并原子落盘 */
+            hlk_mqtt_handle_sync_alarm_rule(root, Id->valuestring);
+        }
+        else if (strcmp(Name->valuestring, ALARM_RULE_SET_NAME) == 0) {
+            HLK_LOG_INFO("################## Cloud AlarmRuleSet ######################\n");
+            /* 保存到 /etc/config/device/alarm_rules.json，回复由 alarm_rule.c 自行发出 */
+            //废弃 不需要这个接口
+            //hlk_mqtt_handle_alarm_rule_set(root, Id->valuestring);
         }
     }
 
