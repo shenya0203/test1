@@ -2,3 +2,8 @@
 .vscode/*
 zig-out/*
 .zig-cache-new/*
+
+# 版本头文件由 `zig build version` 按需生成，不纳入版本控制
+src/hlk_cloud/src/include/hi_cfm_version_mt7688.h
+src/hlk_cloud/src/include/hi_cfm_version_mt7981.h
+src/hlk_cloud/src/include/hi_cfm_version_mt7621.h

@@ -20,6 +20,7 @@ extern "C" {
 #endif /* __cplusplus */
 
 #include <stdint.h>
+#include "app_api.h"
 
 /*****************************************************************************
 *                                DEFINE                                      *
@@ -58,6 +59,7 @@ extern int zig_set_timezone_system(const char *tz);
 
 extern int zig_get_day(void);
 extern int zig_get_hour(void);
+extern int zig_file_stat(const char *path, void *buf);
 
 // Zig实现的绝对时间差值计算函数，避免fabs阻塞
 extern long long zig_time_diff_abs(long long time1, long long time2);

@@ -1741,6 +1741,7 @@ static void hlk_mqtt_handle_set(MessageData *pdata)
     cJSON *Id = cJSON_GetObjectItem(root, "Id");
 
     if (strcmp(DeviceCode->valuestring, mqtt_user_cert.deviceName) != 0) {
+        cJSON_Delete(root);
         HLK_LOG_ERR("DeviceCode not match\n");
         return;
     }
@@ -1845,16 +1846,15 @@ static void hlk_mqtt_handle_set(MessageData *pdata)
             cJSON_Delete(in);
             hlk_syncflow_response(0, Id->valuestring);
         }
-        else if (strcmp(Name->valuestring, SYNC_ALARM_RULE_NAME) == 0) {
-            HLK_LOG_INFO("################## Cloud SyncAlarmRule ######################\n");
-            /* 解析 RuleUrl/ReportUrl -> 立即回复 MQTT -> HTTP GET 下载规则正文并原子落盘 */
-            hlk_mqtt_handle_sync_alarm_rule(root, Id->valuestring);
+        else if (strcmp(Name->valuestring, ALARM_PUSH_NAME) == 0) {
+            HLK_LOG_INFO("################## Cloud AlarmPush ######################\n");
+            /* 解析 AlarmInfo -> 取 RuleUrl/ReportUrl -> HTTP GET 下载规则正文并原子落盘 */
+            hlk_mqtt_handle_alarm_push(root, Id->valuestring);
         }
         else if (strcmp(Name->valuestring, ALARM_RULE_SET_NAME) == 0) {
             HLK_LOG_INFO("################## Cloud AlarmRuleSet ######################\n");
             /* 保存到 /etc/config/device/alarm_rules.json，回复由 alarm_rule.c 自行发出 */
-            //废弃 不需要这个接口
-            //hlk_mqtt_handle_alarm_rule_set(root, Id->valuestring);
+            hlk_mqtt_handle_alarm_rule_set(root, Id->valuestring);
         }
     }
 

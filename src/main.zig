@@ -105,6 +105,13 @@ export fn zig_FD_ISSET(fd: c_int, set: *ZigFdSet) c_int {
     return 0;
 }
 
+const stat_impl = @cImport({
+    @cInclude("sys/stat.h");
+});
+
+export fn zig_file_stat(path: [*:0]const u8, buf: *anyopaque) c_int {
+    return stat_impl.stat(path, @ptrCast(buf));
+}
 // 获取当前时间戳 - Zig实现，避免C ABI兼容性问题
 export fn zig_get_timestamp() i64 {
     // 使用C库的time函数获取当前时间戳

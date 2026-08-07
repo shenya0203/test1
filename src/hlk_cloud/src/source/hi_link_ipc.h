@@ -24,12 +24,12 @@ extern "C" {
  *                                DEFINE                                      *
  *****************************************************************************/
 #define HI_LINK_SOCKET_PATH    "/var/run/hi_link.sock"
-#define MAX_CLIENTS            50
+#define MAX_CLIENTS            1
 #define MAX_BUF_SIZE           4096
 #define MAX_DEVICE_ID_LEN      32
 #define MAX_PRODUCT_ID_LEN     32
 #define MAX_CHANNEL_NAME_LEN   64
-#define MAX_CHANNELS           50
+#define MAX_CHANNELS           2
 
 /* IPC命令类型 */
 typedef enum {
