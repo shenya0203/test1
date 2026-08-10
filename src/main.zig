@@ -16,6 +16,9 @@ extern "c" fn usleep(microseconds: c_uint) c_int;
 
 // 设备五元组(License)操作 C 接口声明
 extern "c" fn cfmGetLicense(DN_: [*c]u8, PjK_: [*c]u8, PdK_: [*c]u8, PdS_: [*c]u8, DS_: [*c]u8, size_: usize) c_int;
+
+// 告警结果上报接口声明 (alarm_rule.c)
+extern "c" fn hlk_alarm_rule_report(params: [*:0]const u8) c_int;
 extern "c" fn cfmSetLicense(DN_: [*c]const u8, PjK_: [*c]const u8, PdK_: [*c]const u8, PdS_: [*c]const u8, DS_: [*c]const u8) c_int;
 extern "c" fn cfmClearLicense() c_int;
 
@@ -333,6 +336,9 @@ fn printUsage() void {
         \\  -c, --clear-license        Clear the device license
         \\  -s, --set-license <DN> <PjK> <PdK> <PdS> <DS>
         \\                             Set the device license with the provided 5-tuple
+        \\  -w, --report-alarm <key=value>...
+        \\                             Report an alarm result via saved ReportUrl
+        \\                             e.g. --report-alarm alarmRuleId=8 alarmState=1 value=10
         \\
         \\If no options are provided, the program will start as a daemon.
         \\
@@ -422,6 +428,32 @@ pub fn main() !void {
             } else {
                 std.debug.print("Set License Failed, ret: {d}\n", .{ret});
             }
+            return;
+        } else if (std.mem.eql(u8, arg, "-w") or std.mem.eql(u8, arg, "--report-alarm")) {
+            // -w 采集所有后续 key=value 参数，用 & 拼接成上报 body 串
+            var joined: std.ArrayList(u8) = .empty;
+            defer joined.deinit(allocator);
+
+            var got_any: bool = false;
+            while (args.next()) |p| {
+                if (got_any) {
+                    try joined.append(allocator, '&');
+                }
+                try joined.appendSlice(allocator, p);
+                got_any = true;
+            }
+
+            if (!got_any) {
+                std.debug.print("Error: --report-alarm requires parameters like alarmRuleId=8&alarmState=1\n\n", .{});
+                printUsage();
+                return;
+            }
+
+            const body_z = try joined.toOwnedSliceSentinel(allocator, 0);
+            defer allocator.free(body_z);
+
+            const ret = hlk_alarm_rule_report(body_z.ptr);
+            std.debug.print("hlk_alarm_rule_report ret: {d}\n", .{ret});
             return;
         } else {
             std.debug.print("Unknown argument: {s}\n\n", .{arg});

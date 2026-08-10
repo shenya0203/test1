@@ -72,6 +72,16 @@ int hlk_mqtt_handle_alarm_rule_set(cJSON *root, const char *id);
  *****************************************************************************/
 int hlk_mqtt_handle_alarm_push(cJSON *root, const char *id);
 
+/*****************************************************************************
+ * 函数名    : hlk_alarm_rule_report
+ * 功能描述  : 供其他进程通过命令行(cloud_app -w)调用，测试上报告警结果
+ * 输入参数  : params - 上报参数串, 如 "alarmRuleId=8&alarmState=1&value=10&..."
+ *             不含 gatewayNo 时自动填充设备名
+ * 输出参数  : 无
+ * 返回值    : 0-上报成功 -1-失败
+ *****************************************************************************/
+int hlk_alarm_rule_report(const char *params);
+
 #ifdef __cplusplus
 #if __cplusplus
 }

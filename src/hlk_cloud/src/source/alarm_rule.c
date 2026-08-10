@@ -18,6 +18,7 @@
 #include "app_api.h"
 #include "alarm_rule.h"
 #include "cJSON.h"
+#include "device_credentials.h"
 #include "hlk_log.h"
 #include "hi_mqtt.h"
 
@@ -253,11 +254,12 @@ static size_t alarm_rule_curl_write_cb(void *ptr, size_t size, size_t nmemb, voi
 }
 
 /*****************************************************************************
- * 内部函数: 通过 HTTP POST 获取规则正文字符串 (SHA1 签名)
+ * 内部函数: 通过 HTTP POST 发送请求 (SHA1 签名)
  * 签名方式与 query_request_address 一致
- * 返回动态分配的字符串 (需 caller free)，失败返回 NULL
+ * 入参: url_in - 目标地址; body - POST body 字符串 (可为 NULL)
+ * 返回动态分配的响应字符串 (需 caller free)，失败返回 NULL
  *****************************************************************************/
-static char* alarm_rule_http_get(const char *url_in)
+static char* alarm_rule_http_post(const char *url_in, const char *body)
 {
     CURL *curl = NULL;
     CURLcode res;
@@ -269,7 +271,7 @@ static char* alarm_rule_http_get(const char *url_in)
     char time_str[16] = {0};
     char nonce[8] = {0};
     char signature[70] = {0};
-    char post_body[128] = {0};
+    char post_body[1024] = {0};
 
     if (url_in == NULL || strlen(url_in) == 0) {
         return NULL;
@@ -296,13 +298,15 @@ static char* alarm_rule_http_get(const char *url_in)
 
     /* 2. 生成 nonce (%.5ld5 + rand() % 9999) */
     srand((unsigned int)time_now);
-    snprintf(nonce, sizeof(nonce), "%.5ld5", rand() % 9999);
+    snprintf(nonce, sizeof(nonce), "%.5ld5", (long)(rand() % 9999));
 
     /* 3. SHA1 签名 */
     hlk_get_signature(time_str, ALARM_RULE_TOKEN, nonce, signature);
 
-    /* 4. 构造 POST body (仅传 deviceCode) */
-    snprintf(post_body, sizeof(post_body), "Sn=%s", mqtt_user_cert.deviceName);
+    /* 4. 构造 POST body (调用方传入, 可含 Sn 或 gatewayNo 等参数) */
+    if (body != NULL) {
+        snprintf(post_body, sizeof(post_body), "%s", body);
+    }
 
     HLK_LOG_INFO("[AlarmRule] POST url=%s time=%s nonce=%s signature=%s body=%s\n",
                  url, time_str, nonce, signature, post_body);
@@ -370,6 +374,98 @@ static char* alarm_rule_http_get(const char *url_in)
     }
 
     return chunk.memory;
+}
+
+/*****************************************************************************
+ * 内部函数: 通过 HTTP POST 获取规则正文字符串 (兼容旧接口)
+ * body = Sn=<deviceName>
+ *****************************************************************************/
+static char* alarm_rule_http_get(const char *url_in)
+{
+    char post_body[128] = {0};
+    snprintf(post_body, sizeof(post_body), "Sn=%s", mqtt_user_cert.deviceName);
+    return alarm_rule_http_post(url_in, post_body);
+}
+
+/*****************************************************************************
+ * 对外接口: hlk_alarm_rule_report
+ * 供其他进程通过 cloud_app -w 调用，测试告警结果上报
+ * 入参: params - 上报参数串, 如 "alarmRuleId=8&alarmState=1&value=10&..."
+ *       (不含 gatewayNo 时自动填充设备名)
+ * 返回值: 0-上报成功 -1-失败
+ *****************************************************************************/
+int hlk_alarm_rule_report(const char *params)
+{
+    char  report_url[512] = {0};
+    char  report_body[1024] = {0};
+    char  gateway_buf[64] = {0};
+    char *response = NULL;
+    FILE *fp = NULL;
+
+    /* 1. 读取已保存的 ReportUrl */
+    fp = fopen(ALARM_REPORT_URL_FILE_PATH, "r");
+    if (fp == NULL) {
+        HLK_LOG_ERR("[AlarmRule] report url file not exist: %s\n", ALARM_REPORT_URL_FILE_PATH);
+        return -1;
+    }
+    if (fgets(report_url, sizeof(report_url), fp) == NULL) {
+        HLK_LOG_ERR("[AlarmRule] read report url failed\n");
+        fclose(fp);
+        return -1;
+    }
+    fclose(fp);
+
+    /* 去掉末尾换行 */
+    {
+        size_t len = strlen(report_url);
+        while (len > 0 && (report_url[len - 1] == '\n' || report_url[len - 1] == '\r')) {
+            report_url[--len] = '\0';
+        }
+    }
+
+    if (strlen(report_url) == 0) {
+        HLK_LOG_ERR("[AlarmRule] report url is empty\n");
+        return -1;
+    }
+
+    /* 2. 若调用方未传 gatewayNo, 自动填充设备名 */
+    if (params == NULL ||
+        (strstr(params, "gatewayNo=") == NULL)) {
+        char dn_buf[64] = {0};
+        char pjk_buf[64] = {0};
+        char pdk_buf[64] = {0};
+        char pds_buf[64] = {0};
+        char ds_buf[64] = {0};
+        if (cfmGetLicense(dn_buf, pjk_buf, pdk_buf, pds_buf, ds_buf,
+                          sizeof(dn_buf)) != 0) {
+            HLK_LOG_ERR("[AlarmRule] get device name failed\n");
+            return -1;
+        }
+        snprintf(gateway_buf, sizeof(gateway_buf), "gatewayNo=%s", dn_buf);
+    }
+
+    if (params != NULL && strlen(params) > 0) {
+        if (strlen(gateway_buf) > 0) {
+            snprintf(report_body, sizeof(report_body), "%s&%s", gateway_buf, params);
+        } else {
+            snprintf(report_body, sizeof(report_body), "%s", params);
+        }
+    } else {
+        snprintf(report_body, sizeof(report_body), "%s", gateway_buf);
+    }
+
+    /* 3. 签名 POST 上报 */
+    response = alarm_rule_http_post(report_url, report_body);
+    if (response == NULL) {
+        HLK_LOG_ERR("[AlarmRule] report alarm http post failed\n");
+        return -1;
+    }
+
+    HLK_LOG_INFO("[AlarmRule] report alarm response:\n%s\n", response);
+    printf("[AlarmRule] report alarm response:\n%s\n", response);
+    free(response);
+
+    return 0;
 }
 
 /*****************************************************************************
